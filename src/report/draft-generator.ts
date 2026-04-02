@@ -71,13 +71,14 @@ export async function generateDailyReportDraft(
     prompt += `## 岡野社長の発信（今日分）\n${data.ceoMessages.join("\n")}\n\n`;
   }
 
-  if (
-    !data.previousReportTry &&
-    data.selfDmMemos.length === 0 &&
-    data.ceoMessages.length === 0
-  ) {
-    prompt +=
-      "※ 自動収集できたデータが限られています。各セクションで【要記入】を多めに設定し、ユーザーが加筆しやすいようにしてください。\n\n";
+  prompt += `## Googleカレンダー（今日）\n${data.todayCalendar}\n\n`;
+  prompt += `## Googleカレンダー（明日）\n${data.tomorrowCalendar}\n\n`;
+  prompt += `※ 今日のカレンダーは「本日行った業務」の【MTG】欄の情報源として使ってください。\n`;
+  prompt += `※ 明日のカレンダーは「今後行う業務」欄の情報源として使ってください。\n\n`;
+
+  if (data.notionActivity) {
+    prompt += `## Notion活動（今日）\n${data.notionActivity}\n\n`;
+    prompt += `※ Notionで作成・更新したページは、関連する業務カテゴリ（IS/SF/TC/Another等）に振り分けて記載してください。\n\n`;
   }
 
   const response = await client.messages.create({

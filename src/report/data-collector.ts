@@ -6,12 +6,24 @@ import {
   SLACK_CEO_USER_ID,
 } from "../config/env.js";
 import { formatDateJapanese } from "../utils/date-formatter.js";
+import {
+  getTodayEvents,
+  getTomorrowEvents,
+  formatEvents,
+} from "../data-sources/google-calendar.js";
+import {
+  getTodayNotionActivity,
+  formatNotionActivity,
+} from "../data-sources/notion.js";
 
 export interface DailyReportData {
   date: string;
   previousReportTry: string | null;
   selfDmMemos: string[];
   ceoMessages: string[];
+  todayCalendar: string;
+  tomorrowCalendar: string;
+  notionActivity: string;
 }
 
 /**
@@ -132,16 +144,23 @@ export async function collectDailyReportData(
 ): Promise<DailyReportData> {
   const todayStart = getTodayStartUnix();
 
-  const [previousReportTry, selfDmMemos, ceoMessages] = await Promise.all([
-    getPreviousReportTry(client),
-    getSelfDmMemos(client, todayStart),
-    getCeoMessages(client, todayStart),
-  ]);
+  const [previousReportTry, selfDmMemos, ceoMessages, todayEvents, tomorrowEvents, notionPages] =
+    await Promise.all([
+      getPreviousReportTry(client),
+      getSelfDmMemos(client, todayStart),
+      getCeoMessages(client, todayStart),
+      getTodayEvents(),
+      getTomorrowEvents(),
+      getTodayNotionActivity(),
+    ]);
 
   return {
     date: formatDateJapanese(new Date()),
     previousReportTry,
     selfDmMemos,
     ceoMessages,
+    todayCalendar: formatEvents(todayEvents),
+    tomorrowCalendar: formatEvents(tomorrowEvents),
+    notionActivity: formatNotionActivity(notionPages),
   };
 }
