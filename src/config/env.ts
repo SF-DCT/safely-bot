@@ -19,6 +19,12 @@ const envSchema = z.object({
 
   // YouTube Data API (optional — falls back to WebSearch)
   YOUTUBE_API_KEY: z.string().optional(),
+
+  // Google Ads API (optional)
+  GOOGLE_ADS_DEVELOPER_TOKEN: z.string().optional(),
+  GOOGLE_ADS_CLIENT_ID: z.string().optional(),
+  GOOGLE_ADS_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_ADS_REFRESH_TOKEN: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);
