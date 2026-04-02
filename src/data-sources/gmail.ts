@@ -1,9 +1,9 @@
 import { env } from "../config/env.js";
 
-// OAuth設定（Google Adsと同じクライアントを共有）
+// OAuth設定（Gmail専用のOAuthクライアント）
 const GMAIL_CONFIG = {
-  clientId: env.GOOGLE_ADS_CLIENT_ID || "",
-  clientSecret: env.GOOGLE_ADS_CLIENT_SECRET || "",
+  clientId: env.GMAIL_CLIENT_ID || "",
+  clientSecret: env.GMAIL_CLIENT_SECRET || "",
   refreshToken: env.GMAIL_REFRESH_TOKEN || "",
 };
 

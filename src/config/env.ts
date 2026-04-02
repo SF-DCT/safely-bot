@@ -27,7 +27,9 @@ const envSchema = z.object({
   GOOGLE_ADS_CLIENT_SECRET: z.string().optional(),
   GOOGLE_ADS_REFRESH_TOKEN: z.string().optional(),
 
-  // Gmail API (shares OAuth client with Google Ads)
+  // Gmail API (独自のOAuthクライアント)
+  GMAIL_CLIENT_ID: z.string().optional(),
+  GMAIL_CLIENT_SECRET: z.string().optional(),
   GMAIL_REFRESH_TOKEN: z.string().optional(),
 });
 
