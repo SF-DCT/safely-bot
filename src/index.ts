@@ -47,11 +47,33 @@ app.message(async ({ message, say }) => {
   }
 });
 
-// App mention handler
+// App mention handler — チャンネルでもメンションで応答
 app.event("app_mention", async ({ event, say }) => {
-  await say(
-    `<@${event.user}> メンションありがとうございます！DMで「ブリーフィング」と送っていただくと今日の情報をお届けします。`,
-  );
+  const text = (event.text || "").toLowerCase();
+
+  if (text.includes("テストブリーフィング") || text.includes("テスト")) {
+    await say("テストブリーフィングを生成中...");
+    try {
+      await sendTestBriefing(app.client, SLACK_USER_ID);
+    } catch (e) {
+      console.error("[Test Briefing] Error:", e);
+      await say(`エラーが発生しました: ${e}`);
+    }
+  } else if (text.includes("ブリーフィング")) {
+    await say("インテリジェンスブリーフィングを生成中...");
+    try {
+      await sendBriefing(app.client, SLACK_USER_ID);
+    } catch (e) {
+      console.error("[Briefing] Error:", e);
+      await say(`エラーが発生しました: ${e}`);
+    }
+  } else if (text.includes("日報作成")) {
+    await say("日報作成機能は現在開発中です！もう少しお待ちください。");
+  } else {
+    await say(
+      `<@${event.user}> はい！以下のコマンドが使えます：\n• 「ブリーフィング」— 今日のインテリジェンスブリーフィングを取得\n• 「テストブリーフィング」— テスト用ダミーデータでブリーフィング表示\n• 「日報作成」— 日報ドラフト生成（開発中）`,
+    );
+  }
 });
 
 // Start the app
