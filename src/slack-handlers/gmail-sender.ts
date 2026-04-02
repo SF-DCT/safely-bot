@@ -1,11 +1,13 @@
 import type { WebClient } from "@slack/web-api";
 import { getUnreadEmails } from "../data-sources/gmail.js";
 import { getClaudeClient } from "../utils/claude-client.js";
+import { EMAIL_CONTEXT } from "../config/email-context.js";
 
 const ANALYSIS_SYSTEM_PROMPT = `あなたはSAFELY Botです。Gmailの未読メールを分析し、返信が必要なメールを仕分けて返信案を提案します。
 
-## ルール
-- SAFELYの高橋幹佳（BGS事業部 General Manager）として適切なビジネストーンで返信案を作成
+${EMAIL_CONTEXT}
+
+## 出力ルール
 - 返信案はそのまま送信できるクオリティで作成
 - 優先度を明確に（🔴高 / 🟡中 / 🟢低）
 - Slack上で読みやすいフォーマットで出力
