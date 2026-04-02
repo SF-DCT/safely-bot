@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
   getAdsPerformance,
+  getCampaignPerformance,
   getAdsAccountList,
 } from "../data-sources/google-ads.js";
 
@@ -64,6 +65,35 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: "get_campaign_performance",
+    description:
+      "Google Adsのキャンペーン別パフォーマンスデータを取得する。キャンペーンごとの広告費、クリック数、CV数、CPAが分かる。P-MAXや検索キャンペーンごとの内訳を見たいときに使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        account: {
+          type: "string",
+          description:
+            "アカウントコードまたはブランド名。例: SKH, SKT, ES, 粗大ゴミ回収本舗, 回収隊, クリーンライフ",
+        },
+        period: {
+          type: "string",
+          enum: [
+            "today",
+            "yesterday",
+            "this_week",
+            "last_week",
+            "this_month",
+            "last_month",
+          ],
+          description:
+            "期間。today=今日, yesterday=昨日, this_week=今週, last_week=先週, this_month=今月, last_month=先月",
+        },
+      },
+      required: ["account", "period"],
+    },
+  },
+  {
     name: "get_ads_account_list",
     description:
       "管理しているGoogle Adsアカウントの一覧を取得する。どのアカウントがあるか確認したいときに使う。",
@@ -100,6 +130,12 @@ export async function executeTool(
       const account = (input.account as string) || "";
       const period = (input.period as string) || "today";
       return await getAdsPerformance(account, period);
+    }
+
+    case "get_campaign_performance": {
+      const account = (input.account as string) || "";
+      const period = (input.period as string) || "today";
+      return await getCampaignPerformance(account, period);
     }
 
     case "get_ads_account_list": {

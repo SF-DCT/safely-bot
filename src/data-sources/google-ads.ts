@@ -245,6 +245,118 @@ export async function getAdsPerformance(
   }
 }
 
+// 公開API: キャンペーン別パフォーマンス
+export async function getCampaignPerformance(
+  accountCode: string,
+  period: string,
+): Promise<string> {
+  const account = resolveAccount(accountCode);
+  if (!account) {
+    const available = Object.entries(ACCOUNTS)
+      .map(([code, info]) => `${code}（${info.name}）`)
+      .join("、");
+    return `アカウント「${accountCode}」が見つかりません。利用可能なアカウント: ${available}`;
+  }
+
+  const { start, end } = getDateRange(period);
+
+  const query = `
+    SELECT
+      campaign.name,
+      campaign.status,
+      campaign.advertising_channel_type,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value
+    FROM campaign
+    WHERE segments.date BETWEEN '${start}' AND '${end}'
+      AND campaign.status = 'ENABLED'
+      AND metrics.cost_micros > 0
+    ORDER BY metrics.cost_micros DESC
+  `;
+
+  try {
+    const results = await executeGaql(account.customerId, query);
+
+    if (results.length === 0) {
+      return `${account.name}（${account.code}）の${start}〜${end}のキャンペーンデータはありません。`;
+    }
+
+    // キャンペーン名で集計
+    const campaigns = new Map<
+      string,
+      {
+        type: string;
+        cost: number;
+        impressions: number;
+        clicks: number;
+        conversions: number;
+        conversionsValue: number;
+      }
+    >();
+
+    for (const row of results as Array<{
+      campaign?: { name?: string; advertisingChannelType?: string };
+      metrics?: {
+        costMicros?: string;
+        impressions?: string;
+        clicks?: string;
+        conversions?: number;
+        conversionsValue?: number;
+      };
+    }>) {
+      const name = row.campaign?.name || "不明";
+      const type = row.campaign?.advertisingChannelType || "";
+      const m = row.metrics;
+
+      if (!campaigns.has(name)) {
+        campaigns.set(name, {
+          type,
+          cost: 0,
+          impressions: 0,
+          clicks: 0,
+          conversions: 0,
+          conversionsValue: 0,
+        });
+      }
+
+      const c = campaigns.get(name)!;
+      c.cost += parseInt(m?.costMicros || "0") / 1_000_000;
+      c.impressions += parseInt(m?.impressions || "0");
+      c.clicks += parseInt(m?.clicks || "0");
+      c.conversions += m?.conversions || 0;
+      c.conversionsValue += m?.conversionsValue || 0;
+    }
+
+    const lines = [
+      `【${account.name}（${account.code}）キャンペーン別パフォーマンス】`,
+      `期間: ${start} 〜 ${end}`,
+      "",
+    ];
+
+    // 広告費順にソート
+    const sorted = [...campaigns.entries()].sort(
+      (a, b) => b[1].cost - a[1].cost,
+    );
+
+    for (const [name, c] of sorted) {
+      const cpa =
+        c.conversions > 0 ? `¥${Math.round(c.cost / c.conversions).toLocaleString()}` : "-";
+      lines.push(
+        `▸ ${name}`,
+        `  広告費: ¥${Math.round(c.cost).toLocaleString()} | クリック: ${c.clicks.toLocaleString()} | CV: ${c.conversions.toFixed(1)} | CPA: ${cpa}`,
+        "",
+      );
+    }
+
+    return lines.join("\n");
+  } catch (error) {
+    return `データ取得エラー: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 // 公開API: 全アカウントサマリー
 export async function getAdsAccountList(): Promise<string> {
   const lines = ["【管理アカウント一覧】"];
