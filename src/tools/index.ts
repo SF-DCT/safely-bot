@@ -4,6 +4,11 @@ import {
   getCampaignPerformance,
   getAdsAccountList,
 } from "../data-sources/google-ads.js";
+import {
+  getUnreadEmails,
+  createGmailDraft,
+  sendGmailReply,
+} from "../data-sources/gmail.js";
 
 // ツール定義 — ここに新しいツールを追加するだけで機能が増える
 export const tools: Anthropic.Tool[] = [
@@ -27,8 +32,9 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "get_daily_report_status",
-    description: "日報作成機能の状態を確認する",
+    name: "generate_daily_report",
+    description:
+      "日報ドラフトを生成する。「日報書いて」「日報お願い」「日報作って」などのリクエストで使う。",
     input_schema: {
       type: "object" as const,
       properties: {},
@@ -103,6 +109,54 @@ export const tools: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: "check_gmail",
+    description:
+      "Gmailの未読メールを確認し、返信が必要なメールを仕分けて返信案を提案する。「メールチェックして」「未読メール確認して」「返信必要なメールある？」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "create_gmail_draft",
+    description:
+      "Gmailに返信の下書きを作成する。メールIDと返信本文を指定する。check_gmailで提案された返信案をもとに下書きを作成するときに使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        message_id: {
+          type: "string",
+          description: "返信対象のメールID（check_gmailの結果に含まれるID）",
+        },
+        reply_body: {
+          type: "string",
+          description: "返信本文（日本語）",
+        },
+      },
+      required: ["message_id", "reply_body"],
+    },
+  },
+  {
+    name: "send_gmail_reply",
+    description:
+      "Gmailで返信メールを直接送信する。メールIDと返信本文を指定する。ユーザーが「送って」「返信して」と指示したときに使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        message_id: {
+          type: "string",
+          description: "返信対象のメールID",
+        },
+        reply_body: {
+          type: "string",
+          description: "返信本文（日本語）",
+        },
+      },
+      required: ["message_id", "reply_body"],
+    },
+  },
 ];
 
 // ツール実行 — 各ツールの実際の処理
@@ -122,8 +176,8 @@ export async function executeTool(
       return "BRIEFING_REQUESTED";
     }
 
-    case "get_daily_report_status": {
-      return "日報作成機能は現在開発中です。Phase 2 Step 2〜5の実装が必要です。";
+    case "generate_daily_report": {
+      return "DAILY_REPORT_REQUESTED";
     }
 
     case "get_ads_performance": {
@@ -140,6 +194,22 @@ export async function executeTool(
 
     case "get_ads_account_list": {
       return await getAdsAccountList();
+    }
+
+    case "check_gmail": {
+      return await getUnreadEmails();
+    }
+
+    case "create_gmail_draft": {
+      const messageId = input.message_id as string;
+      const replyBody = input.reply_body as string;
+      return await createGmailDraft(messageId, replyBody);
+    }
+
+    case "send_gmail_reply": {
+      const messageId = input.message_id as string;
+      const replyBody = input.reply_body as string;
+      return await sendGmailReply(messageId, replyBody);
     }
 
     default:

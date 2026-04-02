@@ -5,6 +5,7 @@ const envSchema = z.object({
   // Slack
   SLACK_BOT_TOKEN: z.string().startsWith("xoxb-"),
   SLACK_APP_TOKEN: z.string().startsWith("xapp-"),
+  SLACK_USER_TOKEN: z.string().startsWith("xoxp-").optional(), // 本人名義で投稿するために必要
 
   // Anthropic (optional until Step 3)
   ANTHROPIC_API_KEY: z.string().startsWith("sk-ant-").optional(),
@@ -25,6 +26,9 @@ const envSchema = z.object({
   GOOGLE_ADS_CLIENT_ID: z.string().optional(),
   GOOGLE_ADS_CLIENT_SECRET: z.string().optional(),
   GOOGLE_ADS_REFRESH_TOKEN: z.string().optional(),
+
+  // Gmail API (shares OAuth client with Google Ads)
+  GMAIL_REFRESH_TOKEN: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);
