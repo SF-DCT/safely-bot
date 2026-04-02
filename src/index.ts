@@ -6,16 +6,36 @@ import {
   sendTestBriefing,
 } from "./slack-handlers/briefing-sender.js";
 import { routeIntent } from "./tools/intent-router.js";
+import {
+  isWatchedChannel,
+  observeAndMaybeRespond,
+} from "./tools/proactive-observer.js";
+
+let botUserId = "";
 
 // DM message handler — Claude tool useで自然な会話
 app.message(async ({ message, say }) => {
   if (message.subtype) return;
   if (!("text" in message) || !message.text) return;
+  if (!("user" in message)) return;
 
+  // 監視対象チャンネルのメッセージ → オブザーバーに渡す
+  if ("channel" in message && isWatchedChannel(message.channel)) {
+    await observeAndMaybeRespond(
+      app.client,
+      message.channel,
+      message.user,
+      message.text,
+      message.ts,
+      botUserId,
+    );
+    return;
+  }
+
+  // DMメッセージ → Intent Routerで応答
   try {
     const result = await routeIntent(message.text);
 
-    // 特別アクション（ブリーフィング等）の処理
     if (result.specialAction === "briefing") {
       await say(result.text);
       await sendBriefing(app.client, SLACK_USER_ID);
@@ -65,10 +85,16 @@ app.event("app_mention", async ({ event, say }) => {
 
 // Start the app
 (async () => {
+  // Bot自身のUser IDを取得
+  const authResult = await app.client.auth.test();
+  botUserId = authResult.user_id || "";
+  console.log(`🤖 Bot User ID: ${botUserId}`);
+
   scheduleIntelligenceBriefing();
 
   await app.start();
   console.log("⚡ SAFELY Bot is running!");
   console.log("🧠 Claude tool use: enabled");
+  console.log("👀 Proactive observer: watching channels");
   console.log("📰 Intelligence briefing: weekdays 9:00 JST");
 })();
