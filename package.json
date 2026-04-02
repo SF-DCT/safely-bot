@@ -1,0 +1,27 @@
+{
+  "name": "safely-bot",
+  "version": "1.0.0",
+  "description": "SAFELY daily report bot - Slack Bot with Claude AI",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@notionhq/client": "^2.2.0",
+    "@slack/bolt": "^4.1.0",
+    "dayjs": "^1.11.0",
+    "dotenv": "^16.4.0",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
