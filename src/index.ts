@@ -5,84 +5,70 @@ import {
   sendBriefing,
   sendTestBriefing,
 } from "./slack-handlers/briefing-sender.js";
+import { routeIntent } from "./tools/intent-router.js";
 
-// DM message handler
+// DM message handler — Claude tool useで自然な会話
 app.message(async ({ message, say }) => {
-  // Only respond to user messages (not bot messages)
   if (message.subtype) return;
+  if (!("text" in message) || !message.text) return;
 
-  if ("text" in message && message.text) {
-    const text = message.text.toLowerCase();
+  try {
+    const result = await routeIntent(message.text);
 
-    if (text.includes("hello") || text.includes("こんにちは")) {
-      await say(
-        "こんにちは！SAFELY Botです。\n以下のコマンドが使えます：\n• 「ブリーフィング」— 今日のインテリジェンスブリーフィングを取得\n• 「テストブリーフィング」— テスト用ダミーデータでブリーフィングを表示\n• 「日報作成」— 日報ドラフトを生成（開発中）",
-      );
-    } else if (
-      text.includes("テストブリーフィング") ||
-      text.includes("テスト")
-    ) {
-      await say("テストブリーフィングを生成中...");
-      try {
-        await sendTestBriefing(app.client, SLACK_USER_ID);
-      } catch (e) {
-        console.error("[Test Briefing] Error:", e);
-        await say(`エラーが発生しました: ${e}`);
-      }
-    } else if (text.includes("ブリーフィング")) {
-      await say("インテリジェンスブリーフィングを生成中...");
-      try {
-        await sendBriefing(app.client, SLACK_USER_ID);
-      } catch (e) {
-        console.error("[Briefing] Error:", e);
-        await say(`エラーが発生しました: ${e}`);
-      }
-    } else if (text.includes("日報作成")) {
-      await say("日報作成機能は現在開発中です！もう少しお待ちください。");
-    } else {
-      await say(
-        "メッセージを受け取りました！以下のコマンドが使えます：\n• 「ブリーフィング」— 今日のインテリジェンスブリーフィングを取得\n• 「テストブリーフィング」— テスト用ダミーデータでブリーフィング表示\n• 「日報作成」— 日報ドラフト生成（開発中）",
-      );
+    // 特別アクション（ブリーフィング等）の処理
+    if (result.specialAction === "briefing") {
+      await say(result.text);
+      await sendBriefing(app.client, SLACK_USER_ID);
+      return;
     }
+    if (result.specialAction === "test_briefing") {
+      await say(result.text);
+      await sendTestBriefing(app.client, SLACK_USER_ID);
+      return;
+    }
+
+    await say(result.text);
+  } catch (e) {
+    console.error("[Intent Router] Error:", e);
+    await say("すみません、エラーが発生しました。もう一度お試しください。");
   }
 });
 
-// App mention handler — チャンネルでもメンションで応答
+// App mention handler — チャンネルでもClaude tool useで応答
 app.event("app_mention", async ({ event, say }) => {
-  const text = (event.text || "").toLowerCase();
+  const text = (event.text || "").replace(/<@[^>]+>/g, "").trim();
+  if (!text) {
+    await say(`<@${event.user}> 何かお手伝いできることはありますか？`);
+    return;
+  }
 
-  if (text.includes("テストブリーフィング") || text.includes("テスト")) {
-    await say("テストブリーフィングを生成中...");
-    try {
-      await sendTestBriefing(app.client, SLACK_USER_ID);
-    } catch (e) {
-      console.error("[Test Briefing] Error:", e);
-      await say(`エラーが発生しました: ${e}`);
-    }
-  } else if (text.includes("ブリーフィング")) {
-    await say("インテリジェンスブリーフィングを生成中...");
-    try {
+  try {
+    const result = await routeIntent(text);
+
+    if (result.specialAction === "briefing") {
+      await say(result.text);
       await sendBriefing(app.client, SLACK_USER_ID);
-    } catch (e) {
-      console.error("[Briefing] Error:", e);
-      await say(`エラーが発生しました: ${e}`);
+      return;
     }
-  } else if (text.includes("日報作成")) {
-    await say("日報作成機能は現在開発中です！もう少しお待ちください。");
-  } else {
-    await say(
-      `<@${event.user}> はい！以下のコマンドが使えます：\n• 「ブリーフィング」— 今日のインテリジェンスブリーフィングを取得\n• 「テストブリーフィング」— テスト用ダミーデータでブリーフィング表示\n• 「日報作成」— 日報ドラフト生成（開発中）`,
-    );
+    if (result.specialAction === "test_briefing") {
+      await say(result.text);
+      await sendTestBriefing(app.client, SLACK_USER_ID);
+      return;
+    }
+
+    await say(result.text);
+  } catch (e) {
+    console.error("[Intent Router] Error:", e);
+    await say("すみません、エラーが発生しました。もう一度お試しください。");
   }
 });
 
 // Start the app
 (async () => {
-  // Register scheduled jobs
   scheduleIntelligenceBriefing();
 
   await app.start();
   console.log("⚡ SAFELY Bot is running!");
+  console.log("🧠 Claude tool use: enabled");
   console.log("📰 Intelligence briefing: weekdays 9:00 JST");
-  console.log("💬 DM commands: ブリーフィング / テストブリーフィング / 日報作成");
 })();
