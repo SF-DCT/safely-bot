@@ -75,7 +75,7 @@ async function getActiveChannels(
   // ボットが参加しているチャンネルを取得（最大3ページ）
   for (let page = 0; page < 3; page++) {
     const result = await client.conversations.list({
-      types: "public_channel,private_channel,mpim",
+      types: "public_channel,private_channel",
       exclude_archived: true,
       limit: 100,
       cursor,
