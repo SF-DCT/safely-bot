@@ -4,6 +4,8 @@ import { scheduleIntelligenceBriefing } from "./scheduler/intelligence-briefing.
 import { scheduleGmailCheck } from "./scheduler/gmail-check.js";
 import { scheduleDailyReport } from "./scheduler/daily-report.js";
 import { scheduleEnhancedCvUpload } from "./scheduler/enhanced-cv.js";
+import { scheduleAdSpendSync } from "./scheduler/ad-spend-sync.js";
+import { scheduleAdReport } from "./scheduler/ad-report.js";
 import {
   sendBriefing,
   sendTestBriefing,
@@ -190,6 +192,8 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   scheduleGmailCheck();
   scheduleDailyReport();
   scheduleEnhancedCvUpload();
+  scheduleAdSpendSync();
+  scheduleAdReport();
 
   await app.start();
   console.log("⚡ SAFELY Bot is running!");
@@ -199,4 +203,6 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   console.log("📬 Gmail check: weekdays 8:30 JST");
   console.log("📝 Daily report: weekdays 19:00 JST");
   console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
+  console.log("📈 Ad spend sync: weekdays 8:00 JST");
+  console.log("📊 Ad report: weekdays 9:05 JST");
 })();

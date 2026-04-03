@@ -13,6 +13,8 @@ import {
   runEnhancedCvUpload,
   runEnhancedCvUploadForBrand,
 } from "../data-sources/enhanced-cv.js";
+import { syncAdSpendToSheets } from "../data-sources/ad-spend-sync.js";
+import { generateDailyAdReport } from "../data-sources/ad-report.js";
 
 // ツール定義 — ここに新しいツールを追加するだけで機能が増える
 export const tools: Anthropic.Tool[] = [
@@ -162,6 +164,38 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: "sync_ad_spend",
+    description:
+      "Google Adsの広告費を各PFのスプレッドシートに自動入力する。「広告費入力して」「広告費同期して」などのリクエストで使う。指定日の広告費をGoogle Ads APIから取得し、各プロジェクトシートに書き込む。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        date: {
+          type: "string",
+          description:
+            "対象日（YYYY-MM-DD形式）。省略時は昨日。例: 2026-04-02",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_ad_report",
+    description:
+      "日次広告レポートを生成する。スプレッドシートから広告費・問合せ数・予算進捗を読み取り、異常検知（消化金額の急変動、問合せ減少、予算進捗率低下等）を含むレポートを生成する。「広告レポート見せて」「広告の状況は？」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        date: {
+          type: "string",
+          description:
+            "対象日（YYYY-MM-DD形式）。省略時は昨日。例: 2026-04-02",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "run_enhanced_cv_upload",
     description:
       "拡張コンバージョン（電話番号ハッシュ方式）をGoogle Adsにアップロードする。SKH/SKT/ESの成約データをSalesforceから取得し、一括アップロードする。「拡張CV」「コンバージョンアップロード」「成約データ送って」などのリクエストで使う。",
@@ -234,6 +268,18 @@ export async function executeTool(
       const messageId = input.message_id as string;
       const replyBody = input.reply_body as string;
       return await sendGmailReply(messageId, replyBody);
+    }
+
+    case "sync_ad_spend": {
+      const dateStr = input.date as string | undefined;
+      const targetDate = dateStr ? new Date(dateStr) : undefined;
+      return await syncAdSpendToSheets(targetDate);
+    }
+
+    case "get_ad_report": {
+      const dateStr = input.date as string | undefined;
+      const targetDate = dateStr ? new Date(dateStr) : undefined;
+      return await generateDailyAdReport(targetDate);
     }
 
     case "run_enhanced_cv_upload": {

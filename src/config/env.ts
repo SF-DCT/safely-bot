@@ -32,6 +32,11 @@ const envSchema = z.object({
   GMAIL_CLIENT_SECRET: z.string().optional(),
   GMAIL_REFRESH_TOKEN: z.string().optional(),
 
+  // Google Sheets API (広告費自動入力・レポート用)
+  GOOGLE_SHEETS_CLIENT_ID: z.string().optional(),
+  GOOGLE_SHEETS_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_SHEETS_REFRESH_TOKEN: z.string().optional(),
+
   // Salesforce REST API (拡張CV用 — Railway上ではsfdx不要)
   SALESFORCE_CLIENT_ID: z.string().optional(),
   SALESFORCE_CLIENT_SECRET: z.string().optional(),

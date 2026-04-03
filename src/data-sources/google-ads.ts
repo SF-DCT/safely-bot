@@ -9,13 +9,17 @@ const GOOGLE_ADS_CONFIG = {
 };
 
 // アカウント情報
-const ACCOUNTS: Record<string, { customerId: string; name: string }> = {
+export const ACCOUNTS: Record<string, { customerId: string; name: string }> = {
   SKH: { customerId: "6859397119", name: "粗大ゴミ回収本舗" },
   SKT: { customerId: "5309755245", name: "粗大ゴミ回収隊" },
   ES: { customerId: "7549098205", name: "粗大ゴミ回収サービス" },
   "SKH-H": { customerId: "9385710005", name: "回収本舗-福岡" },
   "SKT-N": { customerId: "7083718970", name: "回収隊-名古屋" },
+  OL: { customerId: "9998967637", name: "ワンナップLIFE" },
+  ND: { customerId: "4308385895", name: "不用品なんでも回収団" },
+  KM: { customerId: "9448301045", name: "回収モンスター" },
   ISCL: { customerId: "9049601494", name: "クリーンライフ" },
+  ISMS: { customerId: "6690248954", name: "みんなの生活水道修理センター" },
   ISWC: { customerId: "2622557846", name: "水廻り修理サポートセンター" },
   ISCB: { customerId: "7208749580", name: "クリーンライフハチ駆除" },
   TC: { customerId: "5834042025", name: "水道修理のセーフリー" },
@@ -40,7 +44,7 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-async function executeGaql(
+export async function executeGaql(
   customerId: string,
   query: string,
 ): Promise<unknown[]> {
