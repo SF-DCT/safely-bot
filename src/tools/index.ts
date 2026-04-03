@@ -9,6 +9,10 @@ import {
   createGmailDraft,
   sendGmailReply,
 } from "../data-sources/gmail.js";
+import {
+  runEnhancedCvUpload,
+  runEnhancedCvUploadForBrand,
+} from "../data-sources/enhanced-cv.js";
 
 // ツール定義 — ここに新しいツールを追加するだけで機能が増える
 export const tools: Anthropic.Tool[] = [
@@ -157,6 +161,26 @@ export const tools: Anthropic.Tool[] = [
       required: ["message_id", "reply_body"],
     },
   },
+  {
+    name: "run_enhanced_cv_upload",
+    description:
+      "拡張コンバージョン（電話番号ハッシュ方式）をGoogle Adsにアップロードする。SKH/SKT/ESの成約データをSalesforceから取得し、一括アップロードする。「拡張CV」「コンバージョンアップロード」「成約データ送って」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        brand: {
+          type: "string",
+          description:
+            "ブランドコード。ALL=全ブランド一括, SKH, SKT, ES のいずれか。省略時はALL。",
+        },
+        days: {
+          type: "number",
+          description: "取得期間（日数）。デフォルト: 2",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 // ツール実行 — 各ツールの実際の処理
@@ -210,6 +234,15 @@ export async function executeTool(
       const messageId = input.message_id as string;
       const replyBody = input.reply_body as string;
       return await sendGmailReply(messageId, replyBody);
+    }
+
+    case "run_enhanced_cv_upload": {
+      const brand = (input.brand as string) || "ALL";
+      const days = (input.days as number) || 2;
+      if (brand.toUpperCase() === "ALL") {
+        return await runEnhancedCvUpload(days);
+      }
+      return await runEnhancedCvUploadForBrand(brand, days);
     }
 
     default:
