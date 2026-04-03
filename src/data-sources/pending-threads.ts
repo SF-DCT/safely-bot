@@ -1,240 +1,349 @@
-import type { WebClient } from "@slack/web-api";
-import { SLACK_USER_ID } from "../config/env.js";
+import { WebClient } from "@slack/web-api";
+import { env, SLACK_USER_ID } from "../config/env.js";
 import { app } from "../app.js";
+import { getClaudeClient } from "../utils/claude-client.js";
 
 // ============================================================
-// 返信待ちスレッドチェック
-// 自分が参加しているスレッドで、最新メッセージが自分以外 → 返信待ち
+// 返信待ちスレッドチェック v2
+// 1. search.messages（ユーザートークン）で全チャンネル横断メンション検索
+// 2. スレッド内容を取得
+// 3. Claude APIで文脈分析 → 本当に返信が必要なものだけ抽出
 // ============================================================
 
-interface PendingThread {
+interface ThreadCandidate {
   channelId: string;
   channelName: string;
   threadTs: string;
-  threadStarter: string;
-  latestMessage: string;
-  latestUser: string;
-  latestTs: string;
-  replyCount: number;
+  messages: { user: string; text: string; ts: string }[];
+  permalink?: string;
+}
+
+interface AnalyzedThread {
+  channelName: string;
+  summary: string;
+  urgency: "high" | "medium" | "low";
+  reason: string;
   permalink?: string;
 }
 
 /**
- * ボットトークンを使って返信待ちスレッドを検出する
- * ボットが参加しているチャンネルをスキャンし、ユーザーが返信していないスレッドを検出
+ * 返信待ちスレッドを検出し、Claude で分析して返信が必要なものだけ返す
  */
 export async function checkPendingThreads(): Promise<string> {
-  const client = app.client;
+  if (!env.SLACK_USER_TOKEN) {
+    return ":warning: SLACK_USER_TOKEN が未設定のため、返信待ちスレッドのチェックができません。";
+  }
+
+  const userClient = new WebClient(env.SLACK_USER_TOKEN);
+  const botClient = app.client;
 
   try {
-    // 1. ボットが参加しているチャンネルを取得
-    const channels = await getActiveChannels(client);
+    // 1. ユーザートークンで全チャンネル横断メンション検索（直近24時間）
+    console.log("[PendingThreads] Searching mentions...");
+    const candidates = await searchMentions(userClient, botClient);
     console.log(
-      `[PendingThreads] Scanning ${channels.length} channels...`,
+      `[PendingThreads] Found ${candidates.length} thread candidates`,
     );
 
-    // 2. 各チャンネルでスレッドをスキャン
-    const pendingThreads: PendingThread[] = [];
-    const oneDayAgo = String(
-      Math.floor(Date.now() / 1000) - 24 * 60 * 60,
-    );
-
-    for (const channel of channels) {
-      try {
-        const threads = await findPendingThreadsInChannel(
-          client,
-          channel.id,
-          channel.name,
-          oneDayAgo,
-        );
-        pendingThreads.push(...threads);
-      } catch (e) {
-        // 権限不足等でスキャンできないチャンネルはスキップ
-        console.log(
-          `[PendingThreads] Skipped ${channel.name}: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-
-      // APIレート制限対策
-      await sleep(300);
+    if (candidates.length === 0) {
+      const now = new Date().toLocaleString("ja-JP", {
+        timeZone: "Asia/Tokyo",
+      });
+      return [
+        `:white_check_mark: *返信待ちスレッド — ${now}*`,
+        "",
+        "直近24時間で返信が必要なスレッドはありません。",
+      ].join("\n");
     }
 
-    return formatPendingThreads(pendingThreads);
+    // 2. Claude APIで文脈分析
+    console.log("[PendingThreads] Analyzing with Claude...");
+    const analyzed = await analyzeWithClaude(candidates);
+
+    return formatResults(analyzed);
   } catch (e) {
     console.error("[PendingThreads] Error:", e);
     return `:x: 返信待ちスレッドのチェックでエラーが発生しました: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
-async function getActiveChannels(
-  client: WebClient,
-): Promise<{ id: string; name: string }[]> {
-  const channels: { id: string; name: string }[] = [];
-  let cursor: string | undefined;
+/**
+ * ユーザートークンで search.messages → メンションされたスレッドを収集
+ */
+async function searchMentions(
+  userClient: WebClient,
+  botClient: WebClient,
+): Promise<ThreadCandidate[]> {
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const afterDate = oneDayAgo.toISOString().split("T")[0]; // YYYY-MM-DD
 
-  // ボットが参加しているチャンネルを取得（最大3ページ）
-  for (let page = 0; page < 3; page++) {
-    const result = await client.conversations.list({
-      types: "public_channel,private_channel",
-      exclude_archived: true,
-      limit: 100,
-      cursor,
-    });
-
-    for (const ch of result.channels || []) {
-      // is_member: ボットが参加しているチャンネルのみ
-      if (ch.id && ch.name && ch.is_member) {
-        channels.push({ id: ch.id, name: ch.name });
-      }
-    }
-
-    cursor = result.response_metadata?.next_cursor;
-    if (!cursor) break;
-    await sleep(300);
-  }
-
-  return channels;
-}
-
-async function findPendingThreadsInChannel(
-  client: WebClient,
-  channelId: string,
-  channelName: string,
-  oldest: string,
-): Promise<PendingThread[]> {
-  const pending: PendingThread[] = [];
-
-  // チャンネル内の最近のメッセージを取得
-  const history = await client.conversations.history({
-    channel: channelId,
-    oldest,
-    limit: 50,
+  const result = await userClient.search.messages({
+    query: `<@${SLACK_USER_ID}> after:${afterDate}`,
+    sort: "timestamp",
+    sort_dir: "desc",
+    count: 30,
   });
 
-  const threaded = (history.messages || []).filter(
-    (m) => m.reply_count && m.reply_count > 0 && m.ts,
-  );
+  const matches = result.messages?.matches || [];
+  const candidates: ThreadCandidate[] = [];
+  const seen = new Set<string>(); // 重複排除用（channel+threadTs）
 
-  for (const msg of threaded) {
+  for (const match of matches) {
+    const channelId = match.channel?.id;
+    const channelName = match.channel?.name || "unknown";
+    if (!channelId) continue;
+
+    // 自分自身のメッセージはスキップ
+    if (match.user === SLACK_USER_ID) continue;
+
+    // スレッドのルートtsを特定（スレッド内メッセージならthread_ts、そうでなければts）
+    const threadTs =
+      (match as Record<string, unknown>).thread_ts as string ||
+      match.ts ||
+      "";
+    if (!threadTs) continue;
+
+    const key = `${channelId}:${threadTs}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
     try {
-      const replies = await client.conversations.replies({
+      // ボットトークンでスレッド全文を取得
+      const replies = await botClient.conversations.replies({
         channel: channelId,
-        ts: msg.ts!,
-        limit: 30,
+        ts: threadTs,
+        limit: 20,
       });
 
-      const allReplies = replies.messages || [];
-      if (allReplies.length < 2) continue;
+      const allMessages = (replies.messages || []).map((m) => ({
+        user: m.user || "unknown",
+        text: m.text || "",
+        ts: m.ts || "",
+      }));
 
-      // ユーザーがスレッドに参加しているか確認
-      const userParticipated = allReplies.some(
-        (r) => r.user === SLACK_USER_ID,
-      );
-      // ユーザーがスレッド内で@メンションされているか確認
-      const userMentioned = allReplies.some(
-        (r) =>
-          r.user !== SLACK_USER_ID &&
-          r.text?.includes(`<@${SLACK_USER_ID}>`),
-      );
+      if (allMessages.length === 0) continue;
 
-      if (!userParticipated && !userMentioned) continue;
-
-      // 最新のメッセージが自分以外 → 返信待ち
-      const latest = allReplies[allReplies.length - 1];
-      if (latest.user === SLACK_USER_ID) continue;
+      // 自分がスレッド内で最後に返信している場合はスキップ
+      const lastMsg = allMessages[allMessages.length - 1];
+      if (lastMsg.user === SLACK_USER_ID) continue;
 
       // パーマリンク取得
       let permalink: string | undefined;
       try {
-        const link = await client.chat.getPermalink({
+        // メンションされたメッセージのパーマリンク
+        const mentionTs = match.ts || lastMsg.ts;
+        const link = await botClient.chat.getPermalink({
           channel: channelId,
-          message_ts: latest.ts!,
+          message_ts: mentionTs,
         });
         permalink = link.permalink;
       } catch {
         // パーマリンク取得失敗は無視
       }
 
-      pending.push({
+      candidates.push({
         channelId,
         channelName,
-        threadTs: msg.ts!,
-        threadStarter: truncate(msg.text || "(no text)", 60),
-        latestMessage: truncate(latest.text || "(no text)", 80),
-        latestUser: latest.user || "unknown",
-        latestTs: latest.ts!,
-        replyCount: allReplies.length - 1,
+        threadTs,
+        messages: allMessages,
         permalink,
       });
-    } catch {
-      // スレッド取得失敗はスキップ
+    } catch (e) {
+      // ボットがチャンネルにいない場合など → ユーザートークンで再試行
+      try {
+        const replies = await userClient.conversations.replies({
+          channel: channelId,
+          ts: threadTs,
+          limit: 20,
+        });
+
+        const allMessages = (replies.messages || []).map((m) => ({
+          user: m.user || "unknown",
+          text: m.text || "",
+          ts: m.ts || "",
+        }));
+
+        if (allMessages.length === 0) continue;
+        const lastMsg = allMessages[allMessages.length - 1];
+        if (lastMsg.user === SLACK_USER_ID) continue;
+
+        let permalink: string | undefined;
+        try {
+          const link = await userClient.chat.getPermalink({
+            channel: channelId,
+            message_ts: match.ts || lastMsg.ts,
+          });
+          permalink = link.permalink;
+        } catch {
+          // ignore
+        }
+
+        candidates.push({
+          channelId,
+          channelName,
+          threadTs,
+          messages: allMessages,
+          permalink,
+        });
+      } catch {
+        console.log(
+          `[PendingThreads] Skipped thread in ${channelName}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }
 
-    await sleep(200);
+    await sleep(300);
   }
 
-  return pending;
+  return candidates;
 }
 
-function formatPendingThreads(threads: PendingThread[]): string {
+/**
+ * Claude APIでスレッドの文脈を分析し、返信が必要なものを判定
+ */
+async function analyzeWithClaude(
+  candidates: ThreadCandidate[],
+): Promise<AnalyzedThread[]> {
+  const claude = getClaudeClient();
+
+  // スレッド内容をテキスト化
+  const threadsText = candidates
+    .map((c, i) => {
+      const msgs = c.messages
+        .map((m) => {
+          const isMe = m.user === SLACK_USER_ID ? "【自分】" : `<@${m.user}>`;
+          return `  ${isMe}: ${m.text}`;
+        })
+        .join("\n");
+      return `--- スレッド${i + 1}（#${c.channelName}）---\n${msgs}`;
+    })
+    .join("\n\n");
+
+  const response = await claude.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 2048,
+    system: `あなたはSlackメッセージの分析アシスタントです。
+ユーザー（【自分】と表記）がメンションされているスレッドを分析し、返信が本当に必要なものだけを抽出してください。
+
+## 返信が必要なケース
+- 質問されている（回答を求められている）
+- 承認・確認を求められている
+- アクションや対応を依頼されている
+- 報告に対してフィードバックが期待されている
+
+## 返信が不要なケース
+- FYI（情報共有のみ）で、対応不要
+- 全体メンション（@channel, @here）で自分個人への依頼ではない
+- 既に別の人が回答/対応済み
+- 単なる挨拶やお礼
+
+## 出力フォーマット
+JSON配列で返してください。返信が必要なスレッドのみ含めてください。
+返信が必要なスレッドが0件の場合は空配列 [] を返してください。
+
+[
+  {
+    "thread_index": 1,
+    "summary": "スレッドの要約（1行）",
+    "urgency": "high/medium/low",
+    "reason": "返信が必要な理由（1行）"
+  }
+]
+
+urgency判定基準:
+- high: 即対応が必要（承認待ち、ブロッカー、緊急依頼）
+- medium: 今日中に返信したい（質問、フィードバック依頼）
+- low: 時間があるときに返信（軽い確認、情報共有への反応）`,
+    messages: [
+      {
+        role: "user",
+        content: `以下の${candidates.length}件のスレッドを分析してください。【自分】にメンションが来ていますが、本当に返信が必要なものだけを教えてください。\n\n${threadsText}`,
+      },
+    ],
+  });
+
+  // レスポンスからJSONを抽出
+  const text = response.content
+    .filter((b) => b.type === "text")
+    .map((b) => ("text" in b ? b.text : ""))
+    .join("");
+
+  try {
+    // JSONブロックを抽出（```json ... ``` またはそのまま）
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      thread_index: number;
+      summary: string;
+      urgency: "high" | "medium" | "low";
+      reason: string;
+    }[];
+
+    return parsed
+      .filter((p) => p.thread_index >= 1 && p.thread_index <= candidates.length)
+      .map((p) => {
+        const candidate = candidates[p.thread_index - 1];
+        return {
+          channelName: candidate.channelName,
+          summary: p.summary,
+          urgency: p.urgency,
+          reason: p.reason,
+          permalink: candidate.permalink,
+        };
+      });
+  } catch (e) {
+    console.error("[PendingThreads] Claude response parse error:", e);
+    console.error("[PendingThreads] Raw response:", text);
+    return [];
+  }
+}
+
+function formatResults(threads: AnalyzedThread[]): string {
   const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 
   if (threads.length === 0) {
     return [
       `:white_check_mark: *返信待ちスレッド — ${now}*`,
       "",
-      "直近24時間で返信待ちのスレッドはありません。",
+      "メンションはありましたが、分析の結果、返信が必要なものはありませんでした。",
     ].join("\n");
   }
 
-  // 新しい順にソート
-  threads.sort(
-    (a, b) => parseFloat(b.latestTs) - parseFloat(a.latestTs),
-  );
+  // urgency順にソート（high → medium → low）
+  const order = { high: 0, medium: 1, low: 2 };
+  threads.sort((a, b) => order[a.urgency] - order[b.urgency]);
+
+  const urgencyEmoji = {
+    high: ":rotating_light:",
+    medium: ":arrow_right:",
+    low: ":thought_balloon:",
+  };
+  const urgencyLabel = {
+    high: "要即対応",
+    medium: "今日中",
+    low: "余裕あれば",
+  };
 
   const lines = [
     `:speech_balloon: *返信待ちスレッド — ${now}*`,
-    `${threads.length}件のスレッドで返信が待たれています。`,
+    `${threads.length}件のスレッドで返信が必要です。`,
     "",
   ];
 
   for (let i = 0; i < threads.length; i++) {
     const t = threads[i];
-    const time = formatTimestamp(t.latestTs);
-    const link = t.permalink
-      ? ` <${t.permalink}|:link:>`
-      : "";
+    const emoji = urgencyEmoji[t.urgency];
+    const label = urgencyLabel[t.urgency];
+    const link = t.permalink ? ` <${t.permalink}|:link:>` : "";
 
-    lines.push(
-      `*${i + 1}.* #${t.channelName}（${t.replyCount}件の返信）${link}`,
-    );
-    lines.push(`　スレッド: ${t.threadStarter}`);
-    lines.push(
-      `　最新（<@${t.latestUser}> ${time}）: ${t.latestMessage}`,
-    );
+    lines.push(`*${i + 1}.* ${emoji} *[${label}]* #${t.channelName}${link}`);
+    lines.push(`　${t.summary}`);
+    lines.push(`　_${t.reason}_`);
     lines.push("");
   }
 
   return lines.join("\n");
-}
-
-function formatTimestamp(ts: string): string {
-  const date = new Date(parseFloat(ts) * 1000);
-  return date.toLocaleString("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function truncate(text: string, max: number): string {
-  // Slack特殊文字をクリーンアップ
-  const clean = text
-    .replace(/<@[^>]+>/g, "@ユーザー")
-    .replace(/<#[^>|]+\|([^>]+)>/g, "#$1")
-    .replace(/<([^|>]+)\|([^>]+)>/g, "$2")
-    .replace(/\n/g, " ");
-  return clean.length > max ? clean.slice(0, max) + "..." : clean;
 }
 
 function sleep(ms: number): Promise<void> {
