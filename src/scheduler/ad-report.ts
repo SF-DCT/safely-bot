@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { app } from "../app.js";
 import { SLACK_USER_ID } from "../config/env.js";
 import { generateDailyAdReport } from "../data-sources/ad-report.js";
+import { isBusinessDay } from "../utils/jp-holidays.js";
 
 /**
  * 日次広告レポートスケジューラ
@@ -12,6 +13,10 @@ export function scheduleAdReport(): void {
   cron.schedule(
     "5 9 * * 1-5",
     async () => {
+      if (!isBusinessDay()) {
+        console.log("[Scheduler] Skipping ad report (holiday).");
+        return;
+      }
       console.log("[Scheduler] Starting ad report generation...");
       try {
         const report = await generateDailyAdReport();

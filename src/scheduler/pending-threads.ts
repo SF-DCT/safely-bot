@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { app } from "../app.js";
 import { SLACK_USER_ID } from "../config/env.js";
 import { checkPendingThreads } from "../data-sources/pending-threads.js";
+import { isBusinessDay } from "../utils/jp-holidays.js";
 
 /**
  * 毎朝9:30 JST（平日）に返信待ちスレッドをチェックし、Slack DMで報告
@@ -10,6 +11,10 @@ export function schedulePendingThreadsCheck(): void {
   cron.schedule(
     "30 9 * * 1-5",
     async () => {
+      if (!isBusinessDay()) {
+        console.log("[Scheduler] Skipping pending threads check (holiday).");
+        return;
+      }
       console.log("[Scheduler] Starting pending threads check...");
       try {
         const result = await checkPendingThreads();

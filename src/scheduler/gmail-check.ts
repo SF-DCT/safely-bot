@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { app } from "../app.js";
 import { SLACK_USER_ID } from "../config/env.js";
 import { sendGmailDigest } from "../slack-handlers/gmail-sender.js";
+import { isBusinessDay } from "../utils/jp-holidays.js";
 
 /**
  * 毎朝8:30 JST（平日）にGmailチェックを実行
@@ -11,6 +12,10 @@ export function scheduleGmailCheck(): void {
   cron.schedule(
     "30 8 * * 1-5",
     async () => {
+      if (!isBusinessDay()) {
+        console.log("[Scheduler] Skipping Gmail check (holiday).");
+        return;
+      }
       console.log("[Scheduler] Starting Gmail check...");
       try {
         await sendGmailDigest(app.client, SLACK_USER_ID);
