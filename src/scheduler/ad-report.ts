@@ -2,21 +2,15 @@ import cron from "node-cron";
 import { app } from "../app.js";
 import { SLACK_USER_ID } from "../config/env.js";
 import { generateDailyAdReport } from "../data-sources/ad-report.js";
-import { isBusinessDay } from "../utils/jp-holidays.js";
-
 /**
  * 日次広告レポートスケジューラ
- * 毎朝 9:05 JST（平日のみ）にスプレッドシートからデータを読み取り、
+ * 毎朝 9:05 JST（土日祝含む毎日）にスプレッドシートからデータを読み取り、
  * 異常検知レポートをSlack DMに投稿する
  */
 export function scheduleAdReport(): void {
   cron.schedule(
-    "5 9 * * 1-5",
+    "5 9 * * *",
     async () => {
-      if (!isBusinessDay()) {
-        console.log("[Scheduler] Skipping ad report (holiday).");
-        return;
-      }
       console.log("[Scheduler] Starting ad report generation...");
       try {
         const report = await generateDailyAdReport();
