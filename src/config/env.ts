@@ -33,8 +33,10 @@ const envSchema = z.object({
   GMAIL_REFRESH_TOKEN: z.string().optional(),
 
   // Salesforce REST API (拡張CV用 — Railway上ではsfdx不要)
-  SALESFORCE_ACCESS_TOKEN: z.string().optional(),
-  SALESFORCE_INSTANCE_URL: z.string().optional(),
+  SALESFORCE_CLIENT_ID: z.string().optional(),
+  SALESFORCE_CLIENT_SECRET: z.string().optional(),
+  SALESFORCE_REFRESH_TOKEN: z.string().optional(),
+  SALESFORCE_INSTANCE_URL: z.string().default("https://junk-collection.my.salesforce.com"),
 });
 
 export const env = envSchema.parse(process.env);

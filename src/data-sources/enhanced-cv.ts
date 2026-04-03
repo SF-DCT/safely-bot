@@ -104,7 +104,47 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-// Salesforce REST API でデータ取得（sfdx不要）
+// Salesforce OAuth2 refresh tokenでアクセストークン取得
+async function getSalesforceAccessToken(): Promise<{
+  accessToken: string;
+  instanceUrl: string;
+}> {
+  const clientId = env.SALESFORCE_CLIENT_ID;
+  const clientSecret = env.SALESFORCE_CLIENT_SECRET;
+  const refreshToken = env.SALESFORCE_REFRESH_TOKEN;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error("SF_NOT_CONFIGURED");
+  }
+
+  const response = await fetch(
+    `${env.SALESFORCE_INSTANCE_URL}/services/oauth2/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+      }),
+    },
+  );
+
+  const data = await response.json();
+  if (!data.access_token) {
+    throw new Error(
+      `Salesforce token refresh failed: ${JSON.stringify(data)}`,
+    );
+  }
+
+  return {
+    accessToken: data.access_token,
+    instanceUrl: data.instance_url || env.SALESFORCE_INSTANCE_URL,
+  };
+}
+
+// Salesforce REST API でデータ取得
 async function fetchSalesforceData(
   brandCode: string,
   daysBack: number,
@@ -112,13 +152,19 @@ async function fetchSalesforceData(
   const brand = BRANDS[brandCode];
   if (!brand) throw new Error(`Unknown brand: ${brandCode}`);
 
-  // Salesforce REST APIアクセストークン取得
-  const sfAccessToken = env.SALESFORCE_ACCESS_TOKEN;
-  const sfInstanceUrl = env.SALESFORCE_INSTANCE_URL;
-
-  if (!sfAccessToken || !sfInstanceUrl) {
-    // sfdx CLI fallback（ローカル開発用）
-    return fetchSalesforceViaSfdx(brandCode, daysBack);
+  // Salesforce REST API（OAuth refresh token方式）
+  let accessToken: string;
+  let instanceUrl: string;
+  try {
+    const sf = await getSalesforceAccessToken();
+    accessToken = sf.accessToken;
+    instanceUrl = sf.instanceUrl;
+  } catch (e) {
+    if (e instanceof Error && e.message === "SF_NOT_CONFIGURED") {
+      // sfdx CLI fallback（ローカル開発用）
+      return fetchSalesforceViaSfdx(brandCode, daysBack);
+    }
+    throw e;
   }
 
   const query =
@@ -132,15 +178,17 @@ async function fetchSalesforceData(
     `ORDER BY CloseDate DESC`;
 
   const response = await fetch(
-    `${sfInstanceUrl}/services/data/v59.0/query?q=${encodeURIComponent(query)}`,
+    `${instanceUrl}/services/data/v59.0/query?q=${encodeURIComponent(query)}`,
     {
-      headers: { Authorization: `Bearer ${sfAccessToken}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     },
   );
 
   const data = await response.json();
   if (data.errorCode) {
-    throw new Error(`Salesforce error: ${data.message || JSON.stringify(data)}`);
+    throw new Error(
+      `Salesforce error: ${data.message || JSON.stringify(data)}`,
+    );
   }
 
   return (data.records || []) as SfRecord[];
