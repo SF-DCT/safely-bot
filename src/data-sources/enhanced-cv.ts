@@ -105,16 +105,27 @@ async function getAccessToken(): Promise<string> {
 }
 
 // Salesforce OAuth2 refresh tokenでアクセストークン取得
+// sfdx PlatformCLI Connected Appを使用（client_secretは不要）
 async function getSalesforceAccessToken(): Promise<{
   accessToken: string;
   instanceUrl: string;
 }> {
-  const clientId = env.SALESFORCE_CLIENT_ID;
-  const clientSecret = env.SALESFORCE_CLIENT_SECRET;
+  const clientId = env.SALESFORCE_CLIENT_ID || "PlatformCLI";
   const refreshToken = env.SALESFORCE_REFRESH_TOKEN;
 
-  if (!clientId || !clientSecret || !refreshToken) {
+  if (!refreshToken) {
     throw new Error("SF_NOT_CONFIGURED");
+  }
+
+  const params: Record<string, string> = {
+    grant_type: "refresh_token",
+    client_id: clientId,
+    refresh_token: refreshToken,
+  };
+
+  // PlatformCLI以外のConnected Appの場合はclient_secretを追加
+  if (env.SALESFORCE_CLIENT_SECRET) {
+    params.client_secret = env.SALESFORCE_CLIENT_SECRET;
   }
 
   const response = await fetch(
@@ -122,12 +133,7 @@ async function getSalesforceAccessToken(): Promise<{
     {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-      }),
+      body: new URLSearchParams(params),
     },
   );
 
