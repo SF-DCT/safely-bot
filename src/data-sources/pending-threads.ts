@@ -89,16 +89,24 @@ async function searchMentions(
   const seen = new Set<string>(); // 重複排除用（channel+threadTs）
 
   for (const match of matches) {
-    const channelId = match.channel?.id;
-    const channelName = match.channel?.name || "unknown";
+    // search.messages の channel 構造をログ出力（デバッグ）
+    const rawChannel = match.channel as Record<string, unknown> | undefined;
+    const channelId = rawChannel?.id as string | undefined;
+    const channelName = (rawChannel?.name as string) || "unknown";
+
+    console.log(
+      `[PendingThreads] Match: ch=${channelName}, id=${channelId}, user=${match.user}, ts=${match.ts}`,
+    );
+
     if (!channelId) continue;
 
     // 自分自身のメッセージはスキップ
     if (match.user === SLACK_USER_ID) continue;
 
     // スレッドのルートtsを特定（スレッド内メッセージならthread_ts、そうでなければts）
+    const rawMatch = match as Record<string, unknown>;
     const threadTs =
-      (match as Record<string, unknown>).thread_ts as string ||
+      (rawMatch.thread_ts as string) ||
       match.ts ||
       "";
     if (!threadTs) continue;
@@ -106,6 +114,10 @@ async function searchMentions(
     const key = `${channelId}:${threadTs}`;
     if (seen.has(key)) continue;
     seen.add(key);
+
+    console.log(
+      `[PendingThreads] Fetching thread: ch=${channelId}, ts=${threadTs}`,
+    );
 
     try {
       // ボットトークンでスレッド全文を取得
