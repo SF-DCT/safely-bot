@@ -15,6 +15,7 @@ import {
 } from "../data-sources/enhanced-cv.js";
 import { syncAdSpendToSheets } from "../data-sources/ad-spend-sync.js";
 import { generateDailyAdReport } from "../data-sources/ad-report.js";
+import { checkPendingThreads } from "../data-sources/pending-threads.js";
 
 // ツール定義 — ここに新しいツールを追加するだけで機能が増える
 export const tools: Anthropic.Tool[] = [
@@ -215,6 +216,16 @@ export const tools: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: "check_pending_threads",
+    description:
+      "Slackの返信待ちスレッドをチェックする。自分が参加しているスレッドで、まだ返信していないものを一覧表示する。「返信待ち」「未返信スレッド」「スレッドチェック」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ツール実行 — 各ツールの実際の処理
@@ -289,6 +300,10 @@ export async function executeTool(
         return await runEnhancedCvUpload(days);
       }
       return await runEnhancedCvUploadForBrand(brand, days);
+    }
+
+    case "check_pending_threads": {
+      return await checkPendingThreads();
     }
 
     default:

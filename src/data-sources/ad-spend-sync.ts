@@ -17,6 +17,7 @@ interface PfSheetConfig {
   tabFormat: TabFormat;
   googleAdColumn: string; // G検索広告費の列
   skipWrite: boolean; // true = 書き込みスキップ（ISCL等）
+  headerRows: number; // ヘッダー行数（通常1、ND/KMは2）
 }
 
 const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
@@ -26,6 +27,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "V",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "SKH-H",
@@ -33,6 +35,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "V",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "SKT",
@@ -40,6 +43,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "T",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "SKT-N",
@@ -47,6 +51,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "U",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "ES",
@@ -54,6 +59,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "W",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "OL",
@@ -61,6 +67,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "W",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "ND",
@@ -68,6 +75,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "S",
     skipWrite: false,
+    headerRows: 2, // カテゴリ行 + カラム名行
   },
   {
     pf: "KM",
@@ -75,6 +83,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY/M",
     googleAdColumn: "S",
     skipWrite: false,
+    headerRows: 2, // カテゴリ行 + カラム名行
   },
   {
     pf: "ISMS",
@@ -82,6 +91,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY年M月",
     googleAdColumn: "Z",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "ISWC",
@@ -89,6 +99,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYYMM",
     googleAdColumn: "AL",
     skipWrite: false,
+    headerRows: 1,
   },
   {
     pf: "ISCL",
@@ -96,6 +107,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     tabFormat: "YYYY年M月",
     googleAdColumn: "",
     skipWrite: true, // Google Ads Script で入力済み
+    headerRows: 1,
   },
 ];
 
@@ -115,9 +127,9 @@ export function getTabName(date: dayjs.Dayjs, format: TabFormat): string {
   }
 }
 
-/** 日付から行番号を算出（row 1=ヘッダー, row 2=1日...） */
-function getRowForDay(day: number): number {
-  return day + 1;
+/** 日付から行番号を算出（headerRows=1: row2=1日, headerRows=2: row3=1日） */
+export function getRowForDay(day: number, headerRows: number): number {
+  return day + headerRows;
 }
 
 /** Google Ads API から指定日の広告費（円）を取得 */
@@ -168,11 +180,8 @@ export async function syncAdSpendToSheets(
 
   const dateStr = date.format("YYYY-MM-DD");
   const day = date.date();
-  const row = getRowForDay(day);
 
-  console.log(
-    `[AdSpendSync] Syncing for ${dateStr} (row ${row})...`,
-  );
+  console.log(`[AdSpendSync] Syncing for ${dateStr}...`);
 
   const results: SyncResult[] = [];
 
@@ -188,6 +197,7 @@ export async function syncAdSpendToSheets(
 
       // 2. スプレッドシートに書き込み
       const tab = getTabName(date, config.tabFormat);
+      const row = getRowForDay(day, config.headerRows);
       const cell = `'${tab}'!${config.googleAdColumn}${row}`;
       await writeRange(config.spreadsheetId, cell, [[cost]]);
 

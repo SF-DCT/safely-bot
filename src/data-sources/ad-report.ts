@@ -5,6 +5,7 @@ import { readRange } from "./google-sheets.js";
 import {
   PROJECT_SHEET_CONFIG,
   getTabName,
+  getRowForDay,
   type PfSheetConfig,
 } from "./ad-spend-sync.js";
 
@@ -101,8 +102,6 @@ async function readProjectData(
   date: dayjs.Dayjs,
 ): Promise<PfDailyData[]> {
   const day = date.date();
-  const row = day + 1; // 当日行
-  const prevRow = day; // 前日行（= day+1-1）
 
   const results: PfDailyData[] = [];
 
@@ -114,8 +113,8 @@ async function readProjectData(
     if (!googleCol || !inquiryCol) continue;
 
     try {
-      // 当日と前日のG広告費 + 問合せ数を一括で読む
-      // 前日が1日の場合（prevRow=1=ヘッダー行）、前日データはなし
+      const row = getRowForDay(day, config.headerRows);
+      const prevRow = getRowForDay(day - 1, config.headerRows);
       const hasPrevDay = day > 1;
 
       // G広告費: 当日
