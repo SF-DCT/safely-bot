@@ -42,6 +42,14 @@ const envSchema = z.object({
   SALESFORCE_CLIENT_SECRET: z.string().optional(),
   SALESFORCE_REFRESH_TOKEN: z.string().optional(),
   SALESFORCE_INSTANCE_URL: z.string().default("https://junk-collection.my.salesforce.com"),
+
+  // WordPress REST API (TC — toiretumari-center.com)
+  WP_SITE_URL: z.string().default("https://toiretumari-center.com"),
+  WP_USERNAME: z.string().optional(),
+  WP_APP_PASSWORD: z.string().optional(),
+
+  // Neon PostgreSQL (シナリオエンジン用)
+  DATABASE_URL: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

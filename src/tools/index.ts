@@ -16,6 +16,14 @@ import {
 import { syncAdSpendToSheets } from "../data-sources/ad-spend-sync.js";
 import { generateDailyAdReport } from "../data-sources/ad-report.js";
 import { checkPendingThreads } from "../data-sources/pending-threads.js";
+import {
+  searchMember,
+  getMemberArea,
+  getMemberFee,
+  getMemberReviews,
+  getMemberDetail,
+} from "../data-sources/wordpress.js";
+import { scenarioTools, executeScenarioTool } from "./scenario-tools.js";
 
 // ツール定義 — ここに新しいツールを追加するだけで機能が増える
 export const tools: Anthropic.Tool[] = [
@@ -231,6 +239,82 @@ export const tools: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: "search_wp_member",
+    description:
+      "TC（水道修理のセーフリー）のメンバー（業者）をWordPressから検索する。業者名や会社名で検索し、口コミ数・評価・電話番号などの基本情報を返す。「○○水道の情報教えて」「○○の口コミ数は？」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "検索キーワード（業者名、会社名など）",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_wp_member_area",
+    description:
+      "TC（水道修理のセーフリー）のメンバーの対応エリア情報を取得する。「○○水道の対応エリアは？」「○○はどこに対応してる？」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "業者名・会社名",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_wp_member_fee",
+    description:
+      "TC（水道修理のセーフリー）のメンバーの料金情報を取得する。「○○の料金は？」「○○の費用を教えて」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "業者名・会社名",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_wp_member_reviews",
+    description:
+      "TC（水道修理のセーフリー）のメンバーの口コミ・評価データを取得する。「○○の口コミ数は？」「○○の評価を教えて」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "業者名・会社名",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_wp_member_detail",
+    description:
+      "TC（水道修理のセーフリー）のメンバーの全詳細情報を取得する。対応エリア・料金・口コミ・営業時間・決済方法など全フィールドを返す。「○○の詳細教えて」「○○の全情報を見せて」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "業者名・会社名",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  ...scenarioTools,
 ];
 
 // ツール実行 — 各ツールの実際の処理
@@ -310,6 +394,35 @@ export async function executeTool(
 
     case "check_pending_threads": {
       return await checkPendingThreads();
+    }
+
+    // WordPress（TC）メンバー情報
+    case "search_wp_member": {
+      return await searchMember(input.query as string);
+    }
+
+    case "get_wp_member_area": {
+      return await getMemberArea(input.query as string);
+    }
+
+    case "get_wp_member_fee": {
+      return await getMemberFee(input.query as string);
+    }
+
+    case "get_wp_member_reviews": {
+      return await getMemberReviews(input.query as string);
+    }
+
+    case "get_wp_member_detail": {
+      return await getMemberDetail(input.query as string);
+    }
+
+    // シナリオツール
+    case "list_scenarios":
+    case "enroll_contact":
+    case "check_enrollments":
+    case "cancel_enrollment": {
+      return await executeScenarioTool(name, input);
     }
 
     default:
