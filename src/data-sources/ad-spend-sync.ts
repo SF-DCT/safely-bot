@@ -173,6 +173,7 @@ interface SyncResult {
  */
 export async function syncAdSpendToSheets(
   targetDate?: Date,
+  filterPf?: string,
 ): Promise<string> {
   const date = targetDate
     ? dayjs(targetDate).tz("Asia/Tokyo")
@@ -185,7 +186,17 @@ export async function syncAdSpendToSheets(
 
   const results: SyncResult[] = [];
 
-  for (const config of PROJECT_SHEET_CONFIG) {
+  const targets = filterPf
+    ? PROJECT_SHEET_CONFIG.filter(
+        (c) => c.pf.toUpperCase() === filterPf.toUpperCase(),
+      )
+    : PROJECT_SHEET_CONFIG;
+
+  if (filterPf && targets.length === 0) {
+    return `⚠️ 不明なPFコード: ${filterPf}`;
+  }
+
+  for (const config of targets) {
     if (config.skipWrite) {
       results.push({ pf: config.pf, cost: 0, status: "skip" });
       continue;

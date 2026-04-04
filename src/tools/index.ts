@@ -167,7 +167,7 @@ export const tools: Anthropic.Tool[] = [
   {
     name: "sync_ad_spend",
     description:
-      "Google Adsの広告費を各PFのスプレッドシートに自動入力する。「広告費入力して」「広告費同期して」などのリクエストで使う。指定日の広告費をGoogle Ads APIから取得し、各プロジェクトシートに書き込む。",
+      "Google Adsの広告費を各PFのスプレッドシートに自動入力する。「広告費入力して」「広告費同期して」などのリクエストで使う。指定日の広告費をGoogle Ads APIから取得し、各プロジェクトシートに書き込む。特定PFだけの再実行も可能。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -175,6 +175,11 @@ export const tools: Anthropic.Tool[] = [
           type: "string",
           description:
             "対象日（YYYY-MM-DD形式）。省略時は昨日。例: 2026-04-02",
+        },
+        pf: {
+          type: "string",
+          description:
+            "特定PFのみ実行する場合のPFコード。省略時は全PF。例: SKH, SKT, ES",
         },
       },
       required: [],
@@ -284,7 +289,8 @@ export async function executeTool(
     case "sync_ad_spend": {
       const dateStr = input.date as string | undefined;
       const targetDate = dateStr ? new Date(dateStr) : undefined;
-      return await syncAdSpendToSheets(targetDate);
+      const pf = input.pf as string | undefined;
+      return await syncAdSpendToSheets(targetDate, pf);
     }
 
     case "get_ad_report": {
