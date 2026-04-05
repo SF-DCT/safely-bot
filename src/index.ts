@@ -1,5 +1,5 @@
 import { app } from "./app.js";
-import { SLACK_USER_ID, SLACK_REPORT_CHANNEL } from "./config/env.js";
+import { env, SLACK_USER_ID, SLACK_REPORT_CHANNEL } from "./config/env.js";
 import { scheduleIntelligenceBriefing } from "./scheduler/intelligence-briefing.js";
 import { scheduleGmailCheck } from "./scheduler/gmail-check.js";
 import { scheduleDailyReport } from "./scheduler/daily-report.js";
@@ -7,6 +7,9 @@ import { scheduleEnhancedCvUpload } from "./scheduler/enhanced-cv.js";
 import { scheduleAdSpendSync } from "./scheduler/ad-spend-sync.js";
 import { scheduleAdReport } from "./scheduler/ad-report.js";
 import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
+import { initDatabase } from "./data-sources/database.js";
+import { seedScenarios } from "./scenario/seed.js";
+import { scheduleScenarioEngine } from "./scheduler/scenario-engine.js";
 import {
   sendBriefing,
   sendTestBriefing,
@@ -190,6 +193,17 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   botUserId = authResult.user_id || "";
   console.log(`🤖 Bot User ID: ${botUserId}`);
 
+  // シナリオエンジン初期化（DB接続 + シード）
+  if (env.DATABASE_URL) {
+    try {
+      await initDatabase();
+      await seedScenarios();
+      scheduleScenarioEngine();
+    } catch (e) {
+      console.error("[Startup] Scenario engine init failed:", e);
+    }
+  }
+
   scheduleIntelligenceBriefing();
   scheduleGmailCheck();
   scheduleDailyReport();
@@ -209,4 +223,7 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
   console.log("📈 Ad spend sync: weekdays 8:00 JST");
   console.log("📊 Ad report: weekdays 9:05 JST");
+  if (env.DATABASE_URL) {
+    console.log("🔄 Scenario engine: every 5 minutes");
+  }
 })();
