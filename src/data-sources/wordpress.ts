@@ -36,7 +36,12 @@ async function wpFetch<T>(path: string, params?: Record<string, string>): Promis
   if (!res.ok) {
     throw new Error(`WP API error: ${res.status} ${res.statusText}`);
   }
-  return res.json() as Promise<T>;
+  const json = await res.json() as Record<string, unknown>;
+  // TCのWP REST APIはレスポンスが { data: { result: [...] } } でラップされている
+  if (json.data && typeof json.data === "object" && "result" in (json.data as Record<string, unknown>)) {
+    return (json.data as Record<string, unknown>).result as T;
+  }
+  return json as T;
 }
 
 // ---------- 型定義 ----------
