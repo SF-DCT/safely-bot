@@ -1,5 +1,6 @@
-import type { WebClient } from "@slack/web-api";
+import { WebClient } from "@slack/web-api";
 import {
+  env,
   SLACK_USER_ID,
   SLACK_REPORT_CHANNEL,
   SLACK_SELF_DM_CHANNEL,
@@ -21,6 +22,7 @@ export interface DailyReportData {
   previousReportTry: string | null;
   selfDmMemos: string[];
   ceoMessages: string[];
+  slackActivity: string[];
   todayCalendar: string;
   tomorrowCalendar: string;
   notionActivity: string;
@@ -37,6 +39,42 @@ function getTodayStartUnix(): number {
   jst.setHours(0, 0, 0, 0);
   // JST → UTC に戻す
   return Math.floor(jst.getTime() / 1000) - 9 * 3600;
+}
+
+/**
+ * データ収集の開始時刻を返す（UNIX timestamp）
+ * 月曜日は金曜0:00 JST、土日も金曜0:00 JSTに遡る
+ * → DMメモ・社長発信で週末分のデータも拾えるようにする
+ */
+function getDataWindowStartUnix(): number {
+  const now = new Date();
+  const jst = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }),
+  );
+  const dow = jst.getDay(); // 0=Sun, 1=Mon, ...
+
+  let daysBack = 0;
+  if (dow === 1) daysBack = 3; // Mon → Fri
+  else if (dow === 0) daysBack = 2; // Sun → Fri
+  else if (dow === 6) daysBack = 1; // Sat → Fri
+
+  jst.setDate(jst.getDate() - daysBack);
+  jst.setHours(0, 0, 0, 0);
+  return Math.floor(jst.getTime() / 1000) - 9 * 3600;
+}
+
+/**
+ * 今日の日付を YYYY-MM-DD 形式（JST）で返す
+ */
+function getTodayDateStr(): string {
+  const now = new Date();
+  const jst = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Tokyo" }),
+  );
+  const y = jst.getFullYear();
+  const m = String(jst.getMonth() + 1).padStart(2, "0");
+  const d = String(jst.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 /**
@@ -93,6 +131,52 @@ async function getSelfDmMemos(
 }
 
 /**
+ * Slack活動ログ（今日のチャンネル横断メッセージ）を取得
+ * ユーザートークンの search:read スコープが必要
+ */
+async function getUserSlackActivity(): Promise<string[]> {
+  if (!env.SLACK_USER_TOKEN) {
+    console.log(
+      "[DailyReport] SLACK_USER_TOKEN not set — skipping Slack activity search",
+    );
+    return [];
+  }
+
+  const userClient = new WebClient(env.SLACK_USER_TOKEN);
+  const dateStr = getTodayDateStr();
+
+  try {
+    const result = await userClient.search.messages({
+      query: `from:me on:${dateStr}`,
+      sort: "timestamp",
+      sort_dir: "asc",
+      count: 50,
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = result as any;
+    const matches: Array<{ text?: string; channel?: { name?: string } }> =
+      raw?.messages?.matches ?? [];
+
+    return matches
+      .filter((m) => m.text && m.channel?.name)
+      .map((m) => {
+        const text =
+          m.text!.length > 200
+            ? m.text!.substring(0, 200) + "..."
+            : m.text!;
+        return `[#${m.channel!.name}] ${text}`;
+      });
+  } catch (e) {
+    console.error(
+      "[DailyReport] Failed to get Slack activity (search:read scope may be required):",
+      e,
+    );
+    return [];
+  }
+}
+
+/**
  * 岡野社長の発信（labチャンネル等、今日分）を取得
  */
 async function getCeoMessages(
@@ -142,23 +226,33 @@ async function getCeoMessages(
 export async function collectDailyReportData(
   client: WebClient,
 ): Promise<DailyReportData> {
-  const todayStart = getTodayStartUnix();
+  // DMメモ・社長発信は月曜なら金曜0:00から検索（週末分も拾う）
+  const dataWindowStart = getDataWindowStartUnix();
 
-  const [previousReportTry, selfDmMemos, ceoMessages, todayEvents, tomorrowEvents, notionPages] =
-    await Promise.all([
-      getPreviousReportTry(client),
-      getSelfDmMemos(client, todayStart),
-      getCeoMessages(client, todayStart),
-      getTodayEvents(),
-      getTomorrowEvents(),
-      getTodayNotionActivity(),
-    ]);
+  const [
+    previousReportTry,
+    selfDmMemos,
+    ceoMessages,
+    slackActivity,
+    todayEvents,
+    tomorrowEvents,
+    notionPages,
+  ] = await Promise.all([
+    getPreviousReportTry(client),
+    getSelfDmMemos(client, dataWindowStart),
+    getCeoMessages(client, dataWindowStart),
+    getUserSlackActivity(),
+    getTodayEvents(),
+    getTomorrowEvents(),
+    getTodayNotionActivity(),
+  ]);
 
   return {
     date: formatDateJapanese(new Date()),
     previousReportTry,
     selfDmMemos,
     ceoMessages,
+    slackActivity,
     todayCalendar: formatEvents(todayEvents),
     tomorrowCalendar: formatEvents(tomorrowEvents),
     notionActivity: formatNotionActivity(notionPages),

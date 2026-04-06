@@ -71,6 +71,12 @@ export async function generateDailyReportDraft(
     prompt += `## 岡野社長の発信（今日分）\n${data.ceoMessages.join("\n")}\n\n`;
   }
 
+  if (data.slackActivity.length > 0) {
+    prompt += `## Slack活動ログ（今日のチャンネル横断メッセージ）\n${data.slackActivity.join("\n")}\n\n`;
+    prompt += `※ 上記はチャンネル横断での今日の発言ログです。各業務カテゴリ（IS/SF/TC/Another等）に振り分けて「本日行った業務」に反映してください。\n`;
+    prompt += `※ チャンネル名からカテゴリを判断: sf-*/sf-sales → SF、tc-*/manage-sk*/nk-invoice* → TC、isc*/isw*/nk-ad* → IS、lab-*/team-*/partner-* → Another\n\n`;
+  }
+
   prompt += `## Googleカレンダー（今日）\n${data.todayCalendar}\n\n`;
   prompt += `## Googleカレンダー（明日）\n${data.tomorrowCalendar}\n\n`;
   prompt += `※ 今日のカレンダーは「本日行った業務」の【MTG】欄の情報源として使ってください。\n`;
