@@ -217,9 +217,9 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   console.log("🧠 Claude tool use: enabled");
   console.log("👀 Proactive observer: watching channels");
   console.log("📰 Intelligence briefing: weekdays 9:00 JST");
-  console.log("📬 Gmail check: weekdays 8:30 JST");
-  console.log("💬 Pending threads check: weekdays 9:30 JST");
-  console.log("📝 Daily report: weekdays 19:00 JST");
+  //   console.log("📬 Gmail check: weekdays 8:30 JST"); // 一時停止
+  //   console.log("💬 Pending threads check: weekdays 9:30 JST"); // 一時停止
+  //   console.log("📝 Daily report: weekdays 19:00 JST"); // 一時停止
   console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
   console.log("📈 Ad spend sync: weekdays 8:00 JST");
   console.log("📊 Ad report: weekdays 9:05 JST");
