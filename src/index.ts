@@ -205,12 +205,12 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   }
 
   scheduleIntelligenceBriefing();
-  scheduleGmailCheck();
-  scheduleDailyReport();
+  // scheduleGmailCheck(); // 一時停止 2026-04-17 精度改善のため回収
+  // scheduleDailyReport(); // 一時停止 2026-04-17 精度改善のため回収
   scheduleEnhancedCvUpload();
   scheduleAdSpendSync();
   scheduleAdReport();
-  schedulePendingThreadsCheck();
+  // schedulePendingThreadsCheck(); // 一時停止 2026-04-17 精度改善のため回収
 
   await app.start();
   console.log("⚡ SAFELY Bot is running!");
