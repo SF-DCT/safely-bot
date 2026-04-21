@@ -14,6 +14,7 @@
 import { WebClient } from "@slack/web-api";
 import { getClaudeClient } from "../utils/claude-client.js";
 import { appendRow, writeRange } from "./google-sheets.js";
+import { getDb } from "./database.js";
 import {
   ORBIT_LOG_SPREADSHEET_ID,
   ORBIT_LOG_SHEET_NAME,
@@ -63,23 +64,100 @@ interface ClassificationResult {
 }
 
 // ─────────────────────────────────────────────────────────
-// 状態管理（in-memory; mamo再起動で失われるが、シートに痕跡は残る）
+// 状態管理（Postgres永続化 — Sub-Phase 2.1）
 // ─────────────────────────────────────────────────────────
 
-const requests = new Map<string, OrbitRequest>();
-
-export function getRequest(id: string): OrbitRequest | undefined {
-  return requests.get(id);
+interface OrbitRequestRow {
+  id: string;
+  channel_id: string;
+  thread_ts: string;
+  requester_user_id: string;
+  raw_text: string;
+  type: string;
+  title: string;
+  summary: string;
+  affected_area: string | null;
+  reference_images: string[] | null;
+  state: string;
+  approval_dm_ts: string | null;
+  sheet_row_number: number | null;
+  source_link: string | null;
+  created_at: string;
 }
 
-function findRequestByThread(
+function rowToRequest(row: OrbitRequestRow): OrbitRequest {
+  return {
+    id: row.id,
+    channelId: row.channel_id,
+    threadTs: row.thread_ts,
+    requesterUserId: row.requester_user_id,
+    rawText: row.raw_text,
+    classification: {
+      type: row.type as OrbitRequestType,
+      title: row.title,
+      summary: row.summary,
+      affectedArea: row.affected_area || "",
+      referenceImages: row.reference_images || [],
+    },
+    state: row.state as OrbitRequestState,
+    approvalDmTs: row.approval_dm_ts || undefined,
+    sheetRowNumber: row.sheet_row_number || undefined,
+    sourceLink: row.source_link || undefined,
+    createdAt: row.created_at,
+  };
+}
+
+async function saveRequest(req: OrbitRequest): Promise<void> {
+  const db = getDb();
+  await db`
+    INSERT INTO orbit_requests (
+      id, channel_id, thread_ts, requester_user_id, raw_text,
+      type, title, summary, affected_area, reference_images,
+      state, approval_dm_ts, sheet_row_number, source_link
+    ) VALUES (
+      ${req.id}, ${req.channelId}, ${req.threadTs}, ${req.requesterUserId}, ${req.rawText},
+      ${req.classification.type}, ${req.classification.title}, ${req.classification.summary},
+      ${req.classification.affectedArea}, ${JSON.stringify(req.classification.referenceImages)}::jsonb,
+      ${req.state}, ${req.approvalDmTs ?? null}, ${req.sheetRowNumber ?? null}, ${req.sourceLink ?? null}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      raw_text = EXCLUDED.raw_text,
+      title = EXCLUDED.title,
+      summary = EXCLUDED.summary,
+      affected_area = EXCLUDED.affected_area,
+      reference_images = EXCLUDED.reference_images,
+      state = EXCLUDED.state,
+      approval_dm_ts = EXCLUDED.approval_dm_ts,
+      sheet_row_number = EXCLUDED.sheet_row_number,
+      source_link = EXCLUDED.source_link,
+      updated_at = NOW()
+  `;
+}
+
+export async function getRequest(
+  id: string,
+): Promise<OrbitRequest | undefined> {
+  const db = getDb();
+  const rows = (await db`
+    SELECT * FROM orbit_requests WHERE id = ${id}
+  `) as unknown as OrbitRequestRow[];
+  if (rows.length === 0) return undefined;
+  return rowToRequest(rows[0]);
+}
+
+async function findRequestByThread(
   channelId: string,
   threadTs: string,
-): OrbitRequest | undefined {
-  for (const req of requests.values()) {
-    if (req.channelId === channelId && req.threadTs === threadTs) return req;
-  }
-  return undefined;
+): Promise<OrbitRequest | undefined> {
+  const db = getDb();
+  const rows = (await db`
+    SELECT * FROM orbit_requests
+    WHERE channel_id = ${channelId} AND thread_ts = ${threadTs}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `) as unknown as OrbitRequestRow[];
+  if (rows.length === 0) return undefined;
+  return rowToRequest(rows[0]);
 }
 
 // ─────────────────────────────────────────────────────────
@@ -117,7 +195,7 @@ export async function handleOrbitFixIntake(
 
   // スレッド内のメンション → 既存依頼との関係をチェック
   if (threadTs) {
-    const existing = findRequestByThread(channelId, threadTs);
+    const existing = await findRequestByThread(channelId, threadTs);
     if (existing) {
       if (existing.state === "asking_back") {
         // 質問への追加回答 → clarification 処理
@@ -179,7 +257,6 @@ export async function handleOrbitFixIntake(
     sourceLink,
     createdAt: new Date().toISOString(),
   };
-  requests.set(id, request);
 
   await client.chat.postMessage({
     channel: channelId,
@@ -205,6 +282,13 @@ export async function handleOrbitFixIntake(
     await sendApprovalDm(client, request);
   } catch (e) {
     console.error("[OrbitFix] Approval DM error:", e);
+  }
+
+  // すべてのフィールドが埋まった状態でDB保存
+  try {
+    await saveRequest(request);
+  } catch (e) {
+    console.error("[OrbitFix] DB saveRequest error:", e);
   }
 
   return true;
@@ -397,7 +481,7 @@ export async function approveRequest(
   client: WebClient,
   requestId: string,
 ): Promise<void> {
-  const req = requests.get(requestId);
+  const req = await getRequest(requestId);
   if (!req) {
     console.warn(`[OrbitFix] approveRequest: unknown id ${requestId}`);
     return;
@@ -423,6 +507,8 @@ export async function approveRequest(
   } catch (e) {
     console.error("[OrbitFix] Sheet update (approve) error:", e);
   }
+
+  await saveRequest(req);
 }
 
 /** ❌ 却下 */
@@ -431,7 +517,7 @@ export async function rejectRequest(
   requestId: string,
   reason: string,
 ): Promise<void> {
-  const req = requests.get(requestId);
+  const req = await getRequest(requestId);
   if (!req) {
     console.warn(`[OrbitFix] rejectRequest: unknown id ${requestId}`);
     return;
@@ -457,6 +543,8 @@ export async function rejectRequest(
   } catch (e) {
     console.error("[OrbitFix] Sheet update (reject) error:", e);
   }
+
+  await saveRequest(req);
 }
 
 /** 質問に対する依頼者の追加回答を受けて、再度承認カードを送る */
@@ -505,6 +593,8 @@ async function handleClarificationReply(
   } catch (e) {
     console.error("[OrbitFix] Approval DM (re-send) error:", e);
   }
+
+  await saveRequest(req);
 }
 
 /** 💬 依頼者に追加質問 */
@@ -513,7 +603,7 @@ export async function askRequester(
   requestId: string,
   question: string,
 ): Promise<void> {
-  const req = requests.get(requestId);
+  const req = await getRequest(requestId);
   if (!req) {
     console.warn(`[OrbitFix] askRequester: unknown id ${requestId}`);
     return;
@@ -540,6 +630,8 @@ export async function askRequester(
   } catch (e) {
     console.error("[OrbitFix] Sheet update (ask) error:", e);
   }
+
+  await saveRequest(req);
 }
 
 async function replaceApprovalDm(

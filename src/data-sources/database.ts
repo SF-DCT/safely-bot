@@ -59,6 +59,28 @@ export async function initDatabase(): Promise<void> {
     )
   `;
 
+  // Orbit改修依頼の状態永続化（Sub-Phase 2.1）
+  await db`
+    CREATE TABLE IF NOT EXISTS orbit_requests (
+      id                 TEXT PRIMARY KEY,
+      channel_id         TEXT NOT NULL,
+      thread_ts          TEXT NOT NULL,
+      requester_user_id  TEXT NOT NULL,
+      raw_text           TEXT NOT NULL,
+      type               TEXT NOT NULL,
+      title              TEXT NOT NULL,
+      summary            TEXT NOT NULL,
+      affected_area      TEXT,
+      reference_images   JSONB DEFAULT '[]',
+      state              TEXT NOT NULL,
+      approval_dm_ts     TEXT,
+      sheet_row_number   INTEGER,
+      source_link        TEXT,
+      created_at         TIMESTAMPTZ DEFAULT NOW(),
+      updated_at         TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
   // Indexes — try/catch で「already exists」を無視
   try {
     await db`CREATE INDEX idx_enrollments_next ON enrollments(status, next_execute_at) WHERE status = 'active'`;
@@ -72,6 +94,16 @@ export async function initDatabase(): Promise<void> {
   }
   try {
     await db`CREATE INDEX idx_logs_enrollment ON execution_logs(enrollment_id)`;
+  } catch (e: unknown) {
+    if (!(e instanceof Error && e.message.includes("already exists"))) throw e;
+  }
+  try {
+    await db`CREATE INDEX idx_orbit_thread ON orbit_requests(channel_id, thread_ts)`;
+  } catch (e: unknown) {
+    if (!(e instanceof Error && e.message.includes("already exists"))) throw e;
+  }
+  try {
+    await db`CREATE INDEX idx_orbit_state ON orbit_requests(state)`;
   } catch (e: unknown) {
     if (!(e instanceof Error && e.message.includes("already exists"))) throw e;
   }
