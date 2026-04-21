@@ -72,6 +72,16 @@ export function getRequest(id: string): OrbitRequest | undefined {
   return requests.get(id);
 }
 
+function findRequestByThread(
+  channelId: string,
+  threadTs: string,
+): OrbitRequest | undefined {
+  for (const req of requests.values()) {
+    if (req.channelId === channelId && req.threadTs === threadTs) return req;
+  }
+  return undefined;
+}
+
 // ─────────────────────────────────────────────────────────
 // 入口: メンションのフィルタ＆分類
 // ─────────────────────────────────────────────────────────
@@ -104,6 +114,15 @@ export async function handleOrbitFixIntake(
 
   if (!isCgsMember(userId)) return false;
   if (!text || text.trim().length < SHORT_MESSAGE_THRESHOLD) return false;
+
+  // スレッド内のメンション → 質問中の既存依頼への追加回答かチェック
+  if (threadTs) {
+    const existing = findRequestByThread(channelId, threadTs);
+    if (existing && existing.state === "asking_back") {
+      await handleClarificationReply(client, existing, text);
+      return true;
+    }
+  }
 
   let classification: ClassificationResult;
   try {
@@ -433,6 +452,54 @@ export async function rejectRequest(
     await updateStatusInSheet(req, "❌ 却下", reason);
   } catch (e) {
     console.error("[OrbitFix] Sheet update (reject) error:", e);
+  }
+}
+
+/** 質問に対する依頼者の追加回答を受けて、再度承認カードを送る */
+async function handleClarificationReply(
+  client: WebClient,
+  req: OrbitRequest,
+  reply: string,
+): Promise<void> {
+  // 元rawTextに追記（高橋さんが新カードで判断材料として読める）
+  req.rawText = `${req.rawText}\n\n[依頼者からの追加情報]\n${reply}`;
+  req.state = "awaiting_approval_1";
+
+  // 元スレッドに受付返信
+  await client.chat.postMessage({
+    channel: req.channelId,
+    thread_ts: req.threadTs,
+    text:
+      `:ok: 追加情報ありがとうございます。\n` +
+      `内容を踏まえて高橋さんに再度確認します。`,
+  });
+
+  // スプシのステータスを更新
+  try {
+    await updateStatusInSheet(
+      req,
+      "⏳ 追加情報あり・承認待ち",
+      truncate(reply, 200),
+    );
+  } catch (e) {
+    console.error("[OrbitFix] Sheet update (clarification) error:", e);
+  }
+
+  // 既存の承認DM（質問送信済みカード）を「追加情報届きました」表示に置き換え
+  if (req.approvalDmTs) {
+    await replaceApprovalDm(
+      client,
+      req,
+      `:speech_balloon: → :arrow_down: *${req.classification.title}* に依頼者から追加回答が届きました。新しい承認カードを下に送信します。`,
+    );
+    req.approvalDmTs = undefined;
+  }
+
+  // 新しい承認カードを送信
+  try {
+    await sendApprovalDm(client, req);
+  } catch (e) {
+    console.error("[OrbitFix] Approval DM (re-send) error:", e);
   }
 }
 
