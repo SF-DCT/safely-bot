@@ -4,18 +4,19 @@
  * フロー:
  *   [1] CGSメンバーが #team-cgs-顧客成長戦略 で @mamo にメンションして依頼を投げる
  *   [2] mamoがClaude分類で「Orbit改修依頼」と判定（雑談・mamoへの普通の依頼はスルー）
- *   [3] 元発言のスレッドに受付返信 + Notionに「承認待ち」エントリ追記
+ *   [3] 元発言のスレッドに受付返信 + Google Sheets「Orbit改修ログ」に1行追記
  *   [4] 高橋さんDMに 1段階目承認カード送信（実装する/却下/質問）
- *   [5] 高橋さんアクション → 依頼者にスレッド返信 + Notion追記
+ *   [5] 高橋さんアクション → 依頼者にスレッド返信 + シートのステータス列を更新
  *
  * Phase 2でコード自動生成、Phase 3でデプロイ＆完了通知を追加予定。
  */
 
 import { WebClient } from "@slack/web-api";
 import { getClaudeClient } from "../utils/claude-client.js";
-import { getNotionClientOrThrow } from "./notion.js";
+import { appendRow, writeRange } from "./google-sheets.js";
 import {
-  ORBIT_NOTION_PAGE_ID,
+  ORBIT_LOG_SPREADSHEET_ID,
+  ORBIT_LOG_SHEET_NAME,
   SLACK_USER_ID,
   CGS_ALLOWED_USER_IDS,
 } from "../config/env.js";
@@ -47,7 +48,8 @@ export interface OrbitRequest {
   };
   state: OrbitRequestState;
   approvalDmTs?: string; // 高橋DMの承認カード ts
-  notionAppendedBlockIds: string[]; // 追記したブロック追跡用（将来更新で使う）
+  sheetRowNumber?: number; // スプシでの行番号
+  sourceLink?: string; // 元投稿のSlack permalink
   createdAt: string;
 }
 
@@ -61,7 +63,7 @@ interface ClassificationResult {
 }
 
 // ─────────────────────────────────────────────────────────
-// 状態管理（in-memory; mamo再起動で失われるが、Notionに痕跡は残る）
+// 状態管理（in-memory; mamo再起動で失われるが、シートに痕跡は残る）
 // ─────────────────────────────────────────────────────────
 
 const requests = new Map<string, OrbitRequest>();
@@ -71,7 +73,7 @@ export function getRequest(id: string): OrbitRequest | undefined {
 }
 
 // ─────────────────────────────────────────────────────────
-// 入口: チャンネルメッセージのフィルタ＆分類
+// 入口: メンションのフィルタ＆分類
 // ─────────────────────────────────────────────────────────
 
 const SHORT_MESSAGE_THRESHOLD = 8; // 8文字未満はスキップ
@@ -81,7 +83,7 @@ export function isCgsMember(userId: string): boolean {
 }
 
 /**
- * CGSメンバーから mamo への DM / app_mention を受け取り、
+ * CGSメンバーから mamo への app_mention を受け取り、
  * Orbit改修依頼と判定された場合のみ受付フローを起動する。
  *
  * @returns true = 改修依頼として処理した（呼び出し元はreturnしてOK）
@@ -90,7 +92,7 @@ export function isCgsMember(userId: string): boolean {
 export async function handleOrbitFixIntake(
   client: WebClient,
   params: {
-    channelId: string; // DMの場合はIM channelId、メンションの場合は投稿先channel
+    channelId: string;
     userId: string;
     text: string;
     ts: string;
@@ -113,15 +115,28 @@ export async function handleOrbitFixIntake(
 
   if (!classification.is_orbit_request) return false;
 
-  // Gyazo/imageURL を本文からも抽出（Claudeが拾えなかったケースの保険）
   const fallbackImages = extractGyazoUrls(text);
   const referenceImages = Array.from(
     new Set([...classification.reference_images, ...fallbackImages]),
   );
-
-  // メンションの場合、既にスレッド内ならそのスレッドに継続。親投稿ならts自体をスレッド根に。
-  // DMの場合、tsをスレッド根として扱う（DMでもthread_tsで別スレッド可能）
   const replyThreadTs = threadTs || ts;
+
+  // 元投稿の permalink を取得（高橋さんがクリックして文脈を見られるように）
+  let sourceLink: string | undefined;
+  if (
+    !channelId.startsWith("D") &&
+    !channelId.startsWith("M")
+  ) {
+    try {
+      const r = await client.chat.getPermalink({
+        channel: channelId,
+        message_ts: replyThreadTs,
+      });
+      sourceLink = r.permalink || undefined;
+    } catch (e) {
+      console.warn("[OrbitFix] getPermalink failed:", e);
+    }
+  }
 
   const id = `orbit-${ts.replace(".", "")}`;
   const request: OrbitRequest = {
@@ -138,12 +153,11 @@ export async function handleOrbitFixIntake(
       referenceImages,
     },
     state: "awaiting_approval_1",
-    notionAppendedBlockIds: [],
+    sourceLink,
     createdAt: new Date().toISOString(),
   };
   requests.set(id, request);
 
-  // 受付返信（DM=同じDMチャンネル、メンション=投稿スレッド）
   await client.chat.postMessage({
     channel: channelId,
     thread_ts: replyThreadTs,
@@ -155,12 +169,12 @@ export async function handleOrbitFixIntake(
         : `高橋さんの承認後、実装フローに進みます。結果はこちらのDMに通知します。`),
   });
 
-  // Notion追記 (承認待ち)
+  // スプシ追記
   try {
-    const blockIds = await appendIntakeToNotion(request);
-    request.notionAppendedBlockIds.push(...blockIds);
+    const rowNumber = await appendIntakeToSheet(request);
+    request.sheetRowNumber = rowNumber;
   } catch (e) {
-    console.error("[OrbitFix] Notion append error:", e);
+    console.error("[OrbitFix] Sheet append error:", e);
   }
 
   // 高橋DM 1段階目承認カード
@@ -220,7 +234,6 @@ async function classifyMessage(text: string): Promise<ClassificationResult> {
     throw new Error("Empty classification response");
   }
   const raw = textBlock.text.trim();
-  // ```json 等のコードフェンスを剥がす
   const cleaned = raw
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
@@ -261,26 +274,13 @@ async function sendApprovalDm(
           .join(" / ")
       : "（添付なし）";
 
-  // 元投稿リンク: チャンネル/グループのみ取得。DM (D...) は本人しか見られないので省略。
-  let sourceLine = "";
-  if (
-    !request.channelId.startsWith("D") &&
-    !request.channelId.startsWith("M")
-  ) {
-    try {
-      const permalink = await client.chat.getPermalink({
-        channel: request.channelId,
-        message_ts: request.threadTs,
-      });
-      if (permalink.permalink) {
-        sourceLine = `\n<${permalink.permalink}|元投稿を開く>`;
-      }
-    } catch (e) {
-      console.warn("[OrbitFix] getPermalink failed:", e);
-    }
-  } else {
-    sourceLine = `\n_(依頼者からのDMで受付)_`;
-  }
+  const sourceLine = request.sourceLink
+    ? `\n<${request.sourceLink}|元投稿を開く>`
+    : `\n_(リンク取得不可)_`;
+
+  const sheetLine = request.sheetRowNumber
+    ? `\n📊 ログ: <https://docs.google.com/spreadsheets/d/${ORBIT_LOG_SPREADSHEET_ID}/edit#gid=0|スプシ ${request.sheetRowNumber}行目>`
+    : "";
 
   const body = await client.chat.postMessage({
     channel: channelId,
@@ -325,7 +325,7 @@ async function sendApprovalDm(
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*原文:*\n>>> ${truncate(request.rawText, 600)}${sourceLine}`,
+          text: `*原文:*\n>>> ${truncate(request.rawText, 600)}${sourceLine}${sheetLine}`,
         },
       },
       {
@@ -381,7 +381,6 @@ export async function approveRequest(
   }
   req.state = "approved_for_implementation";
 
-  // 依頼者にスレッド返信
   await client.chat.postMessage({
     channel: req.channelId,
     thread_ts: req.threadTs,
@@ -390,21 +389,16 @@ export async function approveRequest(
       `mamo の Phase 2 (自動コード生成) は順次対応予定です。当面は高橋さんが実装します。`,
   });
 
-  // 高橋DMに完了マーク
   await replaceApprovalDm(
     client,
     req,
     `:white_check_mark: 承認済み: *${req.classification.title}* → 実装キューに登録しました。`,
   );
 
-  // Notion追記
   try {
-    await appendStatusToNotion(req, {
-      label: ":white_check_mark: 実装承認",
-      detail: "高橋さんが実装を承認しました。",
-    });
+    await updateStatusInSheet(req, "✅ 実装承認", "高橋さんが実装を承認");
   } catch (e) {
-    console.error("[OrbitFix] Notion append (approve) error:", e);
+    console.error("[OrbitFix] Sheet update (approve) error:", e);
   }
 }
 
@@ -436,12 +430,9 @@ export async function rejectRequest(
   );
 
   try {
-    await appendStatusToNotion(req, {
-      label: ":no_entry_sign: 却下",
-      detail: reason,
-    });
+    await updateStatusInSheet(req, "❌ 却下", reason);
   } catch (e) {
-    console.error("[OrbitFix] Notion append (reject) error:", e);
+    console.error("[OrbitFix] Sheet update (reject) error:", e);
   }
 }
 
@@ -474,16 +465,12 @@ export async function askRequester(
   );
 
   try {
-    await appendStatusToNotion(req, {
-      label: ":speech_balloon: 追加質問",
-      detail: question,
-    });
+    await updateStatusInSheet(req, "💬 質問中", question);
   } catch (e) {
-    console.error("[OrbitFix] Notion append (ask) error:", e);
+    console.error("[OrbitFix] Sheet update (ask) error:", e);
   }
 }
 
-/** 高橋DMの承認カードをステータスメッセージで置き換え */
 async function replaceApprovalDm(
   client: WebClient,
   req: OrbitRequest,
@@ -507,10 +494,8 @@ async function replaceApprovalDm(
 }
 
 // ─────────────────────────────────────────────────────────
-// Notion 追記
+// Google Sheets 追記・更新
 // ─────────────────────────────────────────────────────────
-
-const NOTION_SECTION_HEADER = "🤖 mamo自動受付ログ";
 
 const typeLabelJa: Record<OrbitRequestType, string> = {
   bug: "バグ",
@@ -520,72 +505,58 @@ const typeLabelJa: Record<OrbitRequestType, string> = {
 };
 
 /**
- * 依頼受付時のNotion追記。
- * ページ末尾に「依頼ブロック」を追加。返り値は追記したblock IDの配列。
+ * 依頼受付時のシート追記。返り値は追記された行番号（1始まり）。
+ * カラム順: 受付日時/依頼ID/依頼者/種別/タイトル/要約/影響範囲/参考画像/原文(抜粋)/ステータス/ステータス更新日時/対応者メモ/PR URL/マージ日時/元投稿リンク
  */
-async function appendIntakeToNotion(req: OrbitRequest): Promise<string[]> {
-  const notion = getNotionClientOrThrow();
+async function appendIntakeToSheet(req: OrbitRequest): Promise<number> {
   const dateLabel = formatJstShort(new Date());
-
   const requesterName = await resolveSlackUserName(req.requesterUserId);
 
-  const headingText = `📥 [${dateLabel}] ${req.classification.title}`;
-
-  const children = [
-    { type: "divider" as const, divider: {} },
-    {
-      type: "heading_3" as const,
-      heading_3: {
-        rich_text: [
-          { type: "text" as const, text: { content: headingText } },
-        ],
-      },
-    },
-    bulletedItem(`報告者: ${requesterName}`),
-    bulletedItem(`種別: ${typeLabelJa[req.classification.type]}`),
-    bulletedItem(`影響範囲: ${req.classification.affectedArea || "（未特定）"}`),
-    bulletedItem(`要約: ${req.classification.summary}`),
-    bulletedItem(`原文抜粋: ${truncate(req.rawText, 200)}`),
-    bulletedItem(
-      req.classification.referenceImages.length > 0
-        ? `参考画像: ${req.classification.referenceImages.join(" / ")}`
-        : "参考画像: なし",
-    ),
-    bulletedItem(`ステータス: ⏳ 高橋さん承認待ち`),
-  ];
-
-  const result = await notion.blocks.children.append({
-    block_id: ORBIT_NOTION_PAGE_ID,
-    children,
-  });
-
-  return (result.results || [])
-    .map((r) => ("id" in r ? (r.id as string) : ""))
-    .filter(Boolean);
-}
-
-/** ステータス変更時の追記（承認/却下/質問） */
-async function appendStatusToNotion(
-  req: OrbitRequest,
-  params: { label: string; detail: string },
-): Promise<void> {
-  const notion = getNotionClientOrThrow();
-  const dateLabel = formatJstShort(new Date());
-  await notion.blocks.children.append({
-    block_id: ORBIT_NOTION_PAGE_ID,
-    children: [
-      bulletedItem(`[${dateLabel}] ${params.label}: ${params.detail} (依頼: ${req.classification.title})`),
+  const { rowNumber } = await appendRow(
+    ORBIT_LOG_SPREADSHEET_ID,
+    `${ORBIT_LOG_SHEET_NAME}!A:O`,
+    [
+      [
+        dateLabel,
+        req.id,
+        requesterName,
+        typeLabelJa[req.classification.type],
+        req.classification.title,
+        req.classification.summary,
+        req.classification.affectedArea || "",
+        req.classification.referenceImages.join(" / "),
+        truncate(req.rawText, 500),
+        "⏳ 承認待ち",
+        dateLabel,
+        "",
+        "",
+        "",
+        req.sourceLink || "",
+      ],
     ],
-  });
+  );
+
+  return rowNumber;
 }
 
-function bulletedItem(text: string) {
-  return {
-    type: "bulleted_list_item" as const,
-    bulleted_list_item: {
-      rich_text: [{ type: "text" as const, text: { content: text } }],
-    },
-  };
+/** ステータス変更時、行のJ/K/L列（ステータス/更新日時/メモ）を更新 */
+async function updateStatusInSheet(
+  req: OrbitRequest,
+  status: string,
+  memo: string,
+): Promise<void> {
+  if (!req.sheetRowNumber) {
+    console.warn(
+      `[OrbitFix] updateStatusInSheet: no row number for ${req.id}`,
+    );
+    return;
+  }
+  const dateLabel = formatJstShort(new Date());
+  await writeRange(
+    ORBIT_LOG_SPREADSHEET_ID,
+    `${ORBIT_LOG_SHEET_NAME}!J${req.sheetRowNumber}:L${req.sheetRowNumber}`,
+    [[status, dateLabel, memo]],
+  );
 }
 
 function formatJstShort(d: Date): string {
@@ -604,7 +575,6 @@ async function resolveSlackUserName(userId: string): Promise<string> {
   const cached = userNameCache.get(userId);
   if (cached) return cached;
 
-  // 既知のCGSメンバーは直接マッピング
   const known: Record<string, string> = {
     U029ZAJ3DUK: "吉井 文哉",
     U09GZ9L8CCC: "関谷 ユウキ",

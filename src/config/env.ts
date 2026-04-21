@@ -75,5 +75,7 @@ export const CGS_ALLOWED_USER_IDS = [
 export const ORBIT_REPO_OWNER = "SF-DCT";
 export const ORBIT_REPO_NAME = "cgs-crm";
 export const ORBIT_REPO_DEFAULT_BRANCH = "master";
-// Notion: Orbit-PJT > mamo統合（mamo自動受付ログ追記先）
-export const ORBIT_NOTION_PAGE_ID = "3490bcb6bd108013a865d396f954d5b9";
+// Google Sheets: Orbit改修ログ (mamo自動受付)
+export const ORBIT_LOG_SPREADSHEET_ID =
+  "1rWSnJN77nRzkZfuejWzyj5Bs6dL-fVztwqBZpsxFOfQ";
+export const ORBIT_LOG_SHEET_NAME = "requests";

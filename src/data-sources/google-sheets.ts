@@ -94,3 +94,40 @@ export async function writeRange(
     );
   }
 }
+
+/**
+ * 末尾に行を追加（spreadsheets.values.append）
+ * 戻り値: 追加された行番号（1始まり）
+ */
+export async function appendRow(
+  spreadsheetId: string,
+  range: string,
+  values: (string | number)[][],
+): Promise<{ rowNumber: number; updatedRange: string }> {
+  const accessToken = await getAccessToken();
+  const encodedRange = encodeURIComponent(range);
+
+  const response = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodedRange}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ values }),
+    },
+  );
+
+  const data = await response.json();
+  if (data.error) {
+    throw new Error(
+      `Sheets API append error: ${data.error.message || JSON.stringify(data.error)}`,
+    );
+  }
+
+  const updatedRange: string = data.updates?.updatedRange || "";
+  const m = updatedRange.match(/!\D+(\d+):/);
+  const rowNumber = m ? parseInt(m[1], 10) : 0;
+  return { rowNumber, updatedRange };
+}
