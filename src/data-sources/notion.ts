@@ -6,6 +6,13 @@ function getNotionClient(): Client | null {
   return new Client({ auth: env.NOTION_API_KEY });
 }
 
+export function getNotionClientOrThrow(): Client {
+  if (!env.NOTION_API_KEY) {
+    throw new Error("NOTION_API_KEY is not set");
+  }
+  return new Client({ auth: env.NOTION_API_KEY });
+}
+
 export interface NotionPageSummary {
   title: string;
   url: string;

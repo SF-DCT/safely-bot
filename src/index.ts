@@ -1,5 +1,10 @@
 import { app } from "./app.js";
-import { env, SLACK_USER_ID, SLACK_REPORT_CHANNEL } from "./config/env.js";
+import {
+  env,
+  SLACK_USER_ID,
+  SLACK_REPORT_CHANNEL,
+  CGS_CHANNEL_ID,
+} from "./config/env.js";
 import { scheduleIntelligenceBriefing } from "./scheduler/intelligence-briefing.js";
 import { scheduleGmailCheck } from "./scheduler/gmail-check.js";
 import { scheduleDailyReport } from "./scheduler/daily-report.js";
@@ -28,6 +33,12 @@ import {
   isWatchedChannel,
   observeAndMaybeRespond,
 } from "./tools/proactive-observer.js";
+import {
+  handleOrbitFixIntake,
+  approveRequest,
+  rejectRequest,
+  askRequester,
+} from "./data-sources/orbit-fix.js";
 
 let botUserId = "";
 
@@ -36,6 +47,7 @@ app.message(async ({ message, say }) => {
   if (message.subtype) return;
   if (!("text" in message) || !message.text) return;
   if (!("user" in message)) return;
+  if (message.user === botUserId) return;
 
   // 監視対象チャンネルのメッセージ → オブザーバーに渡す
   if ("channel" in message && isWatchedChannel(message.channel)) {
@@ -100,6 +112,23 @@ app.event("app_mention", async ({ event, say }) => {
   if (!text) {
     await say(`<@${event.user}> 何かお手伝いできることはありますか？`);
     return;
+  }
+
+  // CGSチャンネル内でCGSメンバーからのメンション → Orbit改修依頼か分類
+  if (event.user && event.channel === CGS_CHANNEL_ID) {
+    try {
+      const handled = await handleOrbitFixIntake(app.client, {
+        channelId: event.channel,
+        userId: event.user,
+        text,
+        ts: event.ts,
+        threadTs: event.thread_ts,
+        source: "mention",
+      });
+      if (handled) return;
+    } catch (e) {
+      console.error("[OrbitFix] mention intake error:", e);
+    }
   }
 
   try {
@@ -186,6 +215,124 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   }
 });
 
+// --- Orbit改修依頼 1段階目承認ボタン ---
+
+app.action("orbit_fix_approve", async ({ ack, action }) => {
+  await ack();
+  const requestId = (action as { value?: string }).value || "";
+  try {
+    await approveRequest(app.client, requestId);
+  } catch (e) {
+    console.error("[OrbitFix] approve action error:", e);
+  }
+});
+
+app.action("orbit_fix_reject", async ({ ack, body, action, client }) => {
+  await ack();
+  const requestId = (action as { value?: string }).value || "";
+  const triggerId = (body as { trigger_id?: string }).trigger_id || "";
+  try {
+    await client.views.open({
+      trigger_id: triggerId,
+      view: {
+        type: "modal",
+        callback_id: "orbit_fix_reject_submit",
+        private_metadata: requestId,
+        title: { type: "plain_text", text: "却下理由を入力" },
+        submit: { type: "plain_text", text: "却下を送信" },
+        close: { type: "plain_text", text: "キャンセル" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "reason_block",
+            label: {
+              type: "plain_text",
+              text: "依頼者に伝える却下理由",
+            },
+            element: {
+              type: "plain_text_input",
+              action_id: "reason_input",
+              multiline: true,
+              placeholder: {
+                type: "plain_text",
+                text: "例: 既存機能で代替可能。〜の機能を使ってください。",
+              },
+            },
+          },
+        ],
+      },
+    });
+  } catch (e) {
+    console.error("[OrbitFix] reject modal open error:", e);
+  }
+});
+
+app.action("orbit_fix_ask", async ({ ack, body, action, client }) => {
+  await ack();
+  const requestId = (action as { value?: string }).value || "";
+  const triggerId = (body as { trigger_id?: string }).trigger_id || "";
+  try {
+    await client.views.open({
+      trigger_id: triggerId,
+      view: {
+        type: "modal",
+        callback_id: "orbit_fix_ask_submit",
+        private_metadata: requestId,
+        title: { type: "plain_text", text: "依頼者に質問" },
+        submit: { type: "plain_text", text: "質問を送信" },
+        close: { type: "plain_text", text: "キャンセル" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "question_block",
+            label: {
+              type: "plain_text",
+              text: "依頼者へ送る確認事項",
+            },
+            element: {
+              type: "plain_text_input",
+              action_id: "question_input",
+              multiline: true,
+              placeholder: {
+                type: "plain_text",
+                text: "例: 該当画面のURLと、再現手順を教えてください。",
+              },
+            },
+          },
+        ],
+      },
+    });
+  } catch (e) {
+    console.error("[OrbitFix] ask modal open error:", e);
+  }
+});
+
+app.view("orbit_fix_reject_submit", async ({ ack, view }) => {
+  await ack();
+  const requestId = view.private_metadata;
+  const reason =
+    view.state.values.reason_block?.reason_input?.value?.trim() || "";
+  if (!requestId || !reason) return;
+  try {
+    await rejectRequest(app.client, requestId, reason);
+  } catch (e) {
+    console.error("[OrbitFix] reject submit error:", e);
+  }
+});
+
+app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
+  await ack();
+  const requestId = view.private_metadata;
+  const question =
+    view.state.values.question_block?.question_input?.value?.trim() || "";
+  if (!requestId || !question) return;
+  try {
+    await askRequester(app.client, requestId, question);
+  } catch (e) {
+    console.error("[OrbitFix] ask submit error:", e);
+  }
+});
+
 // Start the app
 (async () => {
   // Bot自身のUser IDを取得
@@ -223,6 +370,7 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
   console.log("📈 Ad spend sync: weekdays 8:00 JST");
   console.log("📊 Ad report: weekdays 9:05 JST");
+  console.log(`🛰️ Orbit改修依頼フロー (Phase 1): @mamo mention in ${CGS_CHANNEL_ID}`);
   if (env.DATABASE_URL) {
     console.log("🔄 Scenario engine: every 5 minutes");
   }

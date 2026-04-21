@@ -50,6 +50,9 @@ const envSchema = z.object({
 
   // Neon PostgreSQL (シナリオエンジン用)
   DATABASE_URL: z.string().optional(),
+
+  // Orbit改修依頼フロー (Phase 1〜)
+  GITHUB_TOKEN: z.string().optional(), // SF-DCT/cgs-crm への push & PR 用
 });
 
 export const env = envSchema.parse(process.env);
@@ -59,3 +62,17 @@ export const SLACK_USER_ID = "U01T29EAGDB"; // 高橋幹佳
 export const SLACK_REPORT_CHANNEL = "C02A8KVSQD8"; // #日報-高橋幹佳
 export const SLACK_SELF_DM_CHANNEL = "D01TV5WS4EL"; // 自分宛DM
 export const SLACK_CEO_USER_ID = "U01SQJC6487"; // 岡野健二
+
+// Orbit改修依頼フロー
+export const CGS_CHANNEL_ID = "C07PCQ53VPS"; // #team-cgs-顧客成長戦略 (private)
+export const CGS_ALLOWED_USER_IDS = [
+  "U029ZAJ3DUK", // 吉井 文哉 (Manager)
+  "U09GZ9L8CCC", // 関谷 ユウキ
+  "U0A1MB1KAMB", // 柿沼 佑
+  "U097ZQJF5FD", // 小山 和気
+] as const;
+export const ORBIT_REPO_OWNER = "SF-DCT";
+export const ORBIT_REPO_NAME = "cgs-crm";
+export const ORBIT_REPO_DEFAULT_BRANCH = "master";
+// Notion: Orbit-PJT > mamo統合（mamo自動受付ログ追記先）
+export const ORBIT_NOTION_PAGE_ID = "3490bcb6bd108013a865d396f954d5b9";
