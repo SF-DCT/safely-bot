@@ -204,7 +204,7 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
     }
   }
 
-  scheduleIntelligenceBriefing();
+  // scheduleIntelligenceBriefing(); // 一時停止 2026-04-21 精度改善のため回収
   // scheduleGmailCheck(); // 一時停止 2026-04-17 精度改善のため回収
   // scheduleDailyReport(); // 一時停止 2026-04-17 精度改善のため回収
   scheduleEnhancedCvUpload();
@@ -216,7 +216,7 @@ app.action("daily_report_cancel", async ({ ack, body }) => {
   console.log("⚡ SAFELY Bot is running!");
   console.log("🧠 Claude tool use: enabled");
   console.log("👀 Proactive observer: watching channels");
-  console.log("📰 Intelligence briefing: weekdays 9:00 JST");
+  // console.log("📰 Intelligence briefing: weekdays 9:00 JST"); // 一時停止
   //   console.log("📬 Gmail check: weekdays 8:30 JST"); // 一時停止
   //   console.log("💬 Pending threads check: weekdays 9:30 JST"); // 一時停止
   //   console.log("📝 Daily report: weekdays 19:00 JST"); // 一時停止
