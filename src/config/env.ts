@@ -66,6 +66,7 @@ export const SLACK_CEO_USER_ID = "U01SQJC6487"; // 岡野健二
 // Orbit改修依頼フロー
 export const CGS_CHANNEL_ID = "C07PCQ53VPS"; // #team-cgs-顧客成長戦略 (private)
 export const CGS_ALLOWED_USER_IDS = [
+  "U01T29EAGDB", // 高橋 幹佳 (BSG GM, テスト＆運用兼依頼)
   "U029ZAJ3DUK", // 吉井 文哉 (Manager)
   "U09GZ9L8CCC", // 関谷 ユウキ
   "U0A1MB1KAMB", // 柿沼 佑
