@@ -115,11 +115,15 @@ export async function handleOrbitFixIntake(
   if (!isCgsMember(userId)) return false;
   if (!text || text.trim().length < SHORT_MESSAGE_THRESHOLD) return false;
 
-  // スレッド内のメンション → 質問中の既存依頼への追加回答かチェック
+  // スレッド内のメンション → 既存依頼との関係をチェック
   if (threadTs) {
     const existing = findRequestByThread(channelId, threadTs);
-    if (existing && existing.state === "asking_back") {
-      await handleClarificationReply(client, existing, text);
+    if (existing) {
+      if (existing.state === "asking_back") {
+        // 質問への追加回答 → clarification 処理
+        await handleClarificationReply(client, existing, text);
+      }
+      // 既存依頼スレッド内のその他のメンションは沈黙（過去スレッドへの誤反応防止）
       return true;
     }
   }

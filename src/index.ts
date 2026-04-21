@@ -107,14 +107,21 @@ app.message(async ({ message, say }) => {
 });
 
 // App mention handler — チャンネルでもClaude tool useで応答
+// 全応答はスレッド内に集約する（チャンネル本体への直接投稿を避ける）
 app.event("app_mention", async ({ event, say }) => {
   const text = (event.text || "").replace(/<@[^>]+>/g, "").trim();
+  // スレッド内 → そのスレッドへ。スレッド外 → 親メッセージのtsに新スレッド。
+  const replyThreadTs = event.thread_ts || event.ts;
+
   if (!text) {
-    await say(`<@${event.user}> 何かお手伝いできることはありますか？`);
+    await say({
+      text: `<@${event.user}> 何かお手伝いできることはありますか？`,
+      thread_ts: replyThreadTs,
+    });
     return;
   }
 
-  // CGSチャンネル内でCGSメンバーからのメンション → Orbit改修依頼か分類
+  // CGSチャンネル内 → Orbit改修依頼か分類
   if (event.user && event.channel === CGS_CHANNEL_ID) {
     try {
       const handled = await handleOrbitFixIntake(app.client, {
@@ -129,31 +136,36 @@ app.event("app_mention", async ({ event, say }) => {
     } catch (e) {
       console.error("[OrbitFix] mention intake error:", e);
     }
+    // CGSチャンネルでOrbit以外の話題には反応しない（無駄な発信防止）
+    return;
   }
 
   try {
     const result = await routeIntent(text);
 
     if (result.specialAction === "briefing") {
-      await say(toSlackMrkdwn(result.text));
+      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
       await sendBriefing(app.client, SLACK_USER_ID);
       return;
     }
     if (result.specialAction === "test_briefing") {
-      await say(toSlackMrkdwn(result.text));
+      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
       await sendTestBriefing(app.client, SLACK_USER_ID);
       return;
     }
     if (result.specialAction === "daily_report") {
-      await say(toSlackMrkdwn(result.text));
+      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
       await sendDailyReportDraft(app.client, event.user || SLACK_USER_ID);
       return;
     }
 
-    await say(toSlackMrkdwn(result.text));
+    await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
   } catch (e) {
     console.error("[Intent Router] Error:", e);
-    await say("すみません、エラーが発生しました。もう一度お試しください。");
+    await say({
+      text: "すみません、エラーが発生しました。もう一度お試しください。",
+      thread_ts: replyThreadTs,
+    });
   }
 });
 
