@@ -62,6 +62,9 @@ app.message(async ({ message, say }) => {
     return;
   }
 
+  // DM以外では自発応答しない（チャンネル/グループでの反応は app_mention 経由のみ）
+  if (!("channel_type" in message) || message.channel_type !== "im") return;
+
   // 日報修正モード中なら、メッセージを修正指示として扱う
   const pendingState = getPendingDraft(message.user);
   if (pendingState?.editing && "channel" in message) {
