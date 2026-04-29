@@ -12,6 +12,7 @@ import { scheduleEnhancedCvUpload } from "./scheduler/enhanced-cv.js";
 import { scheduleAdSpendSync } from "./scheduler/ad-spend-sync.js";
 import { scheduleAdReport } from "./scheduler/ad-report.js";
 import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
+import { scheduleMgrIdeaExtract } from "./scheduler/mgr-idea-extract.js";
 import { initDatabase } from "./data-sources/database.js";
 import { seedScenarios } from "./scenario/seed.js";
 import { scheduleScenarioEngine } from "./scheduler/scenario-engine.js";
@@ -372,6 +373,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   scheduleEnhancedCvUpload();
   scheduleAdSpendSync();
   scheduleAdReport();
+  scheduleMgrIdeaExtract();
   // schedulePendingThreadsCheck(); // 一時停止 2026-04-17 精度改善のため回収
 
   await app.start();
@@ -385,6 +387,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
   console.log("📈 Ad spend sync: weekdays 8:00 JST");
   console.log("📊 Ad report: weekdays 9:05 JST");
+  console.log("📥 MGR weekly idea extract: Fridays 14:00 JST");
   console.log(`🛰️ Orbit改修依頼フロー (Phase 1): @mamo mention in ${CGS_CHANNEL_ID}`);
   if (env.DATABASE_URL) {
     console.log("🔄 Scenario engine: every 5 minutes");

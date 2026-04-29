@@ -1,0 +1,538 @@
+import { Client } from "@notionhq/client";
+import { env } from "../config/env.js";
+import { getClaudeClient } from "../utils/claude-client.js";
+import { readRange } from "./google-sheets.js";
+
+/**
+ * MGR Weekly MTG ページの「3.アイディアから吸い上げ」欄を、
+ * 各メンバーの日報シートH列(アイデアシンキング)からSF関連のみ抽出して埋める。
+ *
+ * 毎週金曜 14:00 JST に scheduler/mgr-idea-extract.ts から呼ばれる。
+ */
+
+const PARENT_PAGE_ID = "33a0bcb6bd1080de80a0ca177138ca01"; // 2026年度
+
+// 抽出対象メンバー（DCT分は権限取得後に追加予定）
+const MEMBERS: { name: string; sheetId: string }[] = [
+  { name: "吉井郁哉", sheetId: "1AQSP0P1zcbMozGKnvvfLRKkPeoS17nCLJgGLpQLVagU" },
+  { name: "野室和佳子", sheetId: "17gW4_NsrF3loutiszMpvlMXTGkJe_po7PcKEK4IcMoU" },
+  { name: "長嶺義博", sheetId: "1D1R5yG4UTtc5P_syxUlu1I_gIDTyC7H5ZG5QqfUBvao" },
+  { name: "中岡正年", sheetId: "1jYELDh80gM09zhm7HAyCv8MHJ8skMuzZNbuDw_vbTxQ" },
+  { name: "長澤裕輔", sheetId: "1Bdpaxva1cDSm-bGaTaYn6KWZVqBottINfjpA4GzqLpI" },
+  { name: "久保木彩子", sheetId: "1Fm9qdyOUPHBMj8BxJRHjcA-C5T-dSO0RVjbj8uT6IxQ" },
+  { name: "宮一優希", sheetId: "1MFeUJ58xwyQlKJiCzupAUEYAQBIyP3lVWPJfXfblmqg" },
+  { name: "目黒真弓", sheetId: "1zyQVDAejIpePO8W2trR0lm_Kz-3DpkXgOjo_pjv6qF0" },
+  { name: "関谷柚季", sheetId: "1VgpqQuB6PB5B-JHsWkgvokGG_av_pw83dGAinDhJAEg" },
+  { name: "藤井樹", sheetId: "11fxmtIPdum_tZBSiMZ_E3RAJwdJ-3LO680FOVGZInbo" },
+  { name: "柿沼佑", sheetId: "1fcDazQEQbBlNHezlQef7N-Vy12KGDVfK8G5ZpdNxBJ0" },
+  { name: "小山和気", sheetId: "14Z9WASo5WvLyHuyyiJFFbfcS_BUwl84lNj5st9tWeTs" },
+  { name: "倉本桃花", sheetId: "1EYSvnIysqAUnZW_WujRlWskfodUooWDz_MU6PQYIzvw" },
+  { name: "小野寺真依", sheetId: "1YaLM63WQlsRgqKgVJsJSOaFt-60oejgkefhwQqHuT0U" },
+];
+
+const SHEET_RANGE = "フォーム形式の回答!A1:K";
+
+interface RawIdea {
+  member: string;
+  date: string; // YYYY/MM/DD
+  idea: string;
+}
+
+interface SfIdea {
+  member: string;
+  date: string;
+  headline: string;
+  summary: string;
+}
+
+interface ExtractResult {
+  targetPageId: string;
+  targetPageTitle: string;
+  targetPageUrl: string;
+  rangeFrom: string; // YYYY/MM/DD
+  rangeTo: string;
+  totalRawIdeas: number;
+  sfIdeas: SfIdea[];
+  membersWithIdeas: string[];
+  membersWithoutIdeas: string[];
+  membersWithFetchError: string[];
+}
+
+function getNotionClient(): Client {
+  if (!env.NOTION_API_KEY) {
+    throw new Error("NOTION_API_KEY is not set");
+  }
+  return new Client({ auth: env.NOTION_API_KEY });
+}
+
+/** JST 日付文字列 (YYYY-MM-DD) を取得 */
+function todayJst(): string {
+  const now = new Date();
+  const jst = new Date(now.getTime() + 9 * 3600 * 1000);
+  return jst.toISOString().slice(0, 10);
+}
+
+function parseYmd(s: string): Date {
+  // "YYYY-MM-DD" or "YYYY/MM/DD"
+  const norm = s.replace(/\//g, "-");
+  return new Date(`${norm}T00:00:00Z`);
+}
+
+function fmtYmdSlash(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}/${m}/${day}`;
+}
+
+function dayOfWeekJa(d: Date): string {
+  const days = ["日", "月", "火", "水", "木", "金", "土"];
+  return days[d.getUTCDay()];
+}
+
+/**
+ * 親ページ「2026年度」配下の "MGR Weekly MTG_YYYYMMDD" 子ページを列挙し、
+ * 日付昇順で返す。
+ */
+async function listMgrPages(): Promise<
+  { id: string; title: string; date: string; url: string }[]
+> {
+  const notion = getNotionClient();
+  const results: { id: string; title: string; date: string; url: string }[] =
+    [];
+  let cursor: string | undefined = undefined;
+
+  do {
+    const res = await notion.blocks.children.list({
+      block_id: PARENT_PAGE_ID,
+      start_cursor: cursor,
+      page_size: 100,
+    });
+
+    for (const block of res.results) {
+      if ("type" in block && block.type === "child_page") {
+        const title = block.child_page.title;
+        const m = title.match(/^MGR Weekly MTG_(\d{8})$/);
+        if (m) {
+          const ymd = m[1];
+          results.push({
+            id: block.id,
+            title,
+            date: ymd,
+            url: `https://www.notion.so/${block.id.replace(/-/g, "")}`,
+          });
+        }
+      }
+    }
+
+    cursor = res.next_cursor || undefined;
+  } while (cursor);
+
+  results.sort((a, b) => a.date.localeCompare(b.date));
+  return results;
+}
+
+/**
+ * 指定シートの直近データから、from(inclusive) 〜 to(inclusive) のタイムスタンプ範囲の
+ * H列(アイデアシンキング)を取得する。
+ */
+async function fetchMemberIdeas(
+  member: { name: string; sheetId: string },
+  fromDate: Date,
+  toDate: Date,
+): Promise<RawIdea[]> {
+  const rows = await readRange(member.sheetId, SHEET_RANGE);
+  if (rows.length <= 1) return [];
+
+  // ヘッダー行(0)をスキップ
+  const ideas: RawIdea[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const dateStr = row[0] || "";
+    const idea = row[7] || ""; // H列
+    const tsStr = row[10] || ""; // K列 タイムスタンプ "YYYY/MM/DD HH:MM:SS"
+
+    if (!idea.trim()) continue;
+    if (!tsStr) continue;
+
+    // タイムスタンプから日付抽出
+    const tsDate = tsStr.split(" ")[0]; // "YYYY/MM/DD"
+    const ts = parseYmd(tsDate);
+    if (Number.isNaN(ts.getTime())) continue;
+
+    if (ts.getTime() < fromDate.getTime()) continue;
+    if (ts.getTime() > toDate.getTime()) continue;
+
+    ideas.push({
+      member: member.name,
+      date: tsDate,
+      idea: idea.trim(),
+    });
+  }
+
+  return ideas;
+}
+
+/**
+ * Claude API を使って SF 関連アイディアのみを仕分けし、見出し+要約に整形する。
+ * SF判定の広めの基準:
+ * - 明示的に「SF / SAFELY / セーフリー」を含む
+ * - SF媒体機能(メンバーページ/コンシェルジュ/事業者紹介/アプリ/二次検索/トレーダーページ/X施策/診断テスト/業者カード等)を含む
+ * - 他PF専有(TC/SKH/SKT/ISMS/ES/OL/ISCB/ISCL/ISWC等のみへの言及)は除外
+ */
+async function filterSfIdeas(rawIdeas: RawIdea[]): Promise<SfIdea[]> {
+  if (rawIdeas.length === 0) return [];
+
+  const claude = getClaudeClient();
+
+  const systemPrompt = `あなたは株式会社SAFELYの事業アシスタントです。各メンバーの日報「アイデアシンキング」欄から、SAFELYメディア(SF)に関連するアイディアのみを抽出します。
+
+判定基準:
+- SF判定する: 「SF / SAFELY / セーフリー」明示、または SF媒体機能(メンバーページ・コンシェルジュ・事業者紹介・アプリ・二次検索・トレーダーページ・X施策・診断テスト・業者カード・toB営業・リード獲得 等) への言及がある
+- SF判定しない: 他PF専有(TC/SKH/SKT/SKHH/ISMS/ES/OL/ISCB/ISCL/ISWC等のみ)、社内ツール/業務効率化のみ、内部MTG運営のみ
+- 複数PF言及で SF を含む場合は SF として採用
+
+出力は JSON 配列のみ。各要素:
+{
+  "index": 入力配列のindex(0始まり),
+  "is_sf": true|false,
+  "headline": "20文字以内の見出し",
+  "summary": "1〜2行で要点を要約(100文字目安)"
+}
+
+is_sf=false の要素は出力に含めない。`;
+
+  const userPrompt = `以下の生アイディアからSF関連のみを抽出・整形してください。
+
+入力:
+${JSON.stringify(
+  rawIdeas.map((r, i) => ({ index: i, member: r.member, date: r.date, idea: r.idea })),
+  null,
+  2,
+)}
+
+JSONのみ出力(配列):`;
+
+  const response = await claude.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 8192,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userPrompt }],
+  });
+
+  const textBlock = response.content.find((b) => b.type === "text");
+  const text = textBlock?.type === "text" ? textBlock.text : "";
+
+  // JSON 配列を抽出
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    console.warn("[MGR Idea Extract] Claude response had no JSON array");
+    return [];
+  }
+
+  let parsed: { index: number; is_sf: boolean; headline: string; summary: string }[];
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    console.error("[MGR Idea Extract] Failed to parse Claude JSON:", e);
+    return [];
+  }
+
+  const sfIdeas: SfIdea[] = [];
+  for (const item of parsed) {
+    if (!item.is_sf) continue;
+    const raw = rawIdeas[item.index];
+    if (!raw) continue;
+    sfIdeas.push({
+      member: raw.member,
+      date: raw.date,
+      headline: item.headline || "",
+      summary: item.summary || "",
+    });
+  }
+
+  return sfIdeas;
+}
+
+/**
+ * 抽出結果から Notion ブロック配列を組み立てる。
+ */
+function buildNotionBlocks(result: ExtractResult): unknown[] {
+  const blocks: unknown[] = [];
+
+  // ヘッダー callout
+  const fromD = parseYmd(result.rangeFrom);
+  const toD = parseYmd(result.rangeTo);
+  const fromLabel = `${result.rangeFrom}(${dayOfWeekJa(fromD)})`;
+  const toLabel = `${result.rangeTo}(${dayOfWeekJa(toD)})`;
+  const memberCount = MEMBERS.length;
+
+  blocks.push({
+    object: "block",
+    type: "callout",
+    callout: {
+      icon: { type: "emoji", emoji: "📥" },
+      color: "yellow_background",
+      rich_text: [
+        {
+          type: "text",
+          text: {
+            content: `抽出期間: ${fromLabel}〜${toLabel}　／　対象: 各メンバー日報「アイデアシンキング（5分）」欄からSF関連のみ抽出\n抽出範囲: ${memberCount}名分（DCTメンバーは権限取得後に追加予定）\nSF関連: ${result.sfIdeas.length}件 / 生アイディア: ${result.totalRawIdeas}件`,
+          },
+        },
+      ],
+    },
+  });
+
+  // メンバーごとに heading + bulleted list
+  const byMember = new Map<string, SfIdea[]>();
+  for (const idea of result.sfIdeas) {
+    if (!byMember.has(idea.member)) byMember.set(idea.member, []);
+    byMember.get(idea.member)!.push(idea);
+  }
+
+  // MEMBERS の順序で出力
+  for (const m of MEMBERS) {
+    const ideas = byMember.get(m.name);
+    if (!ideas || ideas.length === 0) continue;
+
+    blocks.push({
+      object: "block",
+      type: "heading_3",
+      heading_3: {
+        rich_text: [{ type: "text", text: { content: m.name } }],
+      },
+    });
+
+    for (const idea of ideas) {
+      const mmdd = idea.date.slice(5).replace("/", "/"); // MM/DD
+      blocks.push({
+        object: "block",
+        type: "bulleted_list_item",
+        bulleted_list_item: {
+          rich_text: [
+            {
+              type: "text",
+              text: { content: `${mmdd} ${idea.headline}` },
+              annotations: { bold: true },
+            },
+            {
+              type: "text",
+              text: { content: `\n${idea.summary}` },
+            },
+          ],
+        },
+      });
+    }
+  }
+
+  // フッター: SFアイディア無しメンバー
+  if (result.membersWithoutIdeas.length > 0) {
+    blocks.push({
+      object: "block",
+      type: "callout",
+      callout: {
+        icon: { type: "emoji", emoji: "ℹ️" },
+        color: "gray_background",
+        rich_text: [
+          {
+            type: "text",
+            text: {
+              content: `今回のSFアイディア無し: ${result.membersWithoutIdeas.join(" / ")}（アイディア欄が空、または他PF専有のアイディア）`,
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  // フッター: 取得エラー
+  if (result.membersWithFetchError.length > 0) {
+    blocks.push({
+      object: "block",
+      type: "callout",
+      callout: {
+        icon: { type: "emoji", emoji: "⚠️" },
+        color: "red_background",
+        rich_text: [
+          {
+            type: "text",
+            text: {
+              content: `取得エラー: ${result.membersWithFetchError.join(" / ")}（権限/シート名/列構造を確認してください）`,
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  return blocks;
+}
+
+/**
+ * MGRページの「3.アイディアから吸い上げ」セクションの中身を、
+ * 「## 4. ナレッジシェア」の直前まで全削除し、新ブロック群を挿入する。
+ */
+async function replaceSection3(
+  pageId: string,
+  newBlocks: unknown[],
+): Promise<void> {
+  const notion = getNotionClient();
+
+  // すべてのトップレベルブロックを取得
+  const allBlocks: { id: string; type: string; raw: unknown }[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const res = await notion.blocks.children.list({
+      block_id: pageId,
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    for (const b of res.results) {
+      if ("type" in b && "id" in b) {
+        allBlocks.push({ id: b.id, type: b.type, raw: b });
+      }
+    }
+    cursor = res.next_cursor || undefined;
+  } while (cursor);
+
+  // セクション3 / セクション4 の heading_2 を特定
+  const isHeading = (b: { type: string; raw: unknown }, contains: string): boolean => {
+    if (b.type !== "heading_2") return false;
+    const r = b.raw as {
+      heading_2?: { rich_text?: { plain_text?: string }[] };
+    };
+    const rts = r.heading_2?.rich_text || [];
+    const text = rts.map((t) => t.plain_text || "").join("");
+    return text.includes(contains);
+  };
+
+  const idx3 = allBlocks.findIndex((b) =>
+    isHeading(b, "3.アイディアから吸い上げ"),
+  );
+  const idx4 = allBlocks.findIndex((b) => isHeading(b, "4. ナレッジシェア"));
+
+  if (idx3 < 0) {
+    throw new Error(
+      "Section heading '## 3.アイディアから吸い上げ' not found on page",
+    );
+  }
+  if (idx4 < 0) {
+    throw new Error("Section heading '## 4. ナレッジシェア' not found on page");
+  }
+  if (idx4 <= idx3) {
+    throw new Error("Section ordering invalid (idx4 <= idx3)");
+  }
+
+  // 間のブロックを削除
+  const toDelete = allBlocks.slice(idx3 + 1, idx4);
+  for (const b of toDelete) {
+    try {
+      await notion.blocks.delete({ block_id: b.id });
+    } catch (e) {
+      console.warn(`[MGR Idea Extract] Failed to delete block ${b.id}:`, e);
+    }
+  }
+
+  // セクション3 heading の直後に新ブロック群を挿入
+  // Notion API は append + after で指定位置挿入をサポート
+  const headingId = allBlocks[idx3].id;
+  await notion.blocks.children.append({
+    block_id: pageId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    children: newBlocks as any,
+    after: headingId,
+  });
+}
+
+/**
+ * 金曜抽出のメインエントリ。
+ */
+export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
+  // 1. MGR ページ一覧取得
+  const pages = await listMgrPages();
+  if (pages.length === 0) {
+    throw new Error("No MGR Weekly MTG pages found under 2026年度");
+  }
+
+  // 2. 最新ページ(=次回MTG用)、前回ページ(=前回MTG)を特定
+  const latest = pages[pages.length - 1];
+  const prior = pages.length >= 2 ? pages[pages.length - 2] : null;
+
+  // 3. 抽出範囲: 前回MTG翌日 〜 今日。前回ページが無ければ過去7日。
+  const today = parseYmd(todayJst());
+  let fromDate: Date;
+  if (prior) {
+    const priorDate = parseYmd(
+      `${prior.date.slice(0, 4)}-${prior.date.slice(4, 6)}-${prior.date.slice(6, 8)}`,
+    );
+    fromDate = new Date(priorDate.getTime() + 24 * 3600 * 1000);
+  } else {
+    fromDate = new Date(today.getTime() - 7 * 24 * 3600 * 1000);
+  }
+
+  // 4. 各メンバーの日報からH列を取得
+  const allRawIdeas: RawIdea[] = [];
+  const membersWithFetchError: string[] = [];
+  const membersWithRawIdeas = new Set<string>();
+
+  for (const member of MEMBERS) {
+    try {
+      const ideas = await fetchMemberIdeas(member, fromDate, today);
+      if (ideas.length > 0) membersWithRawIdeas.add(member.name);
+      allRawIdeas.push(...ideas);
+    } catch (e) {
+      console.error(`[MGR Idea Extract] Fetch error for ${member.name}:`, e);
+      membersWithFetchError.push(member.name);
+    }
+  }
+
+  // 5. SF関連のみ抽出
+  const sfIdeas = await filterSfIdeas(allRawIdeas);
+  const membersWithSfIdeas = new Set(sfIdeas.map((i) => i.member));
+  const membersWithoutSfIdeas = MEMBERS.map((m) => m.name).filter(
+    (n) => !membersWithSfIdeas.has(n) && !membersWithFetchError.includes(n),
+  );
+
+  const result: ExtractResult = {
+    targetPageId: latest.id,
+    targetPageTitle: latest.title,
+    targetPageUrl: latest.url,
+    rangeFrom: fmtYmdSlash(fromDate),
+    rangeTo: fmtYmdSlash(today),
+    totalRawIdeas: allRawIdeas.length,
+    sfIdeas,
+    membersWithIdeas: Array.from(membersWithSfIdeas),
+    membersWithoutIdeas: membersWithoutSfIdeas,
+    membersWithFetchError,
+  };
+
+  // 6. Notion セクション3 を上書き
+  const blocks = buildNotionBlocks(result);
+  await replaceSection3(latest.id, blocks);
+
+  return result;
+}
+
+/** 結果を Slack 投稿用に整形 */
+export function formatExtractResultForSlack(result: ExtractResult): string {
+  const lines: string[] = [];
+  lines.push("📥 *MGR金曜アイディア吸い上げ完了*");
+  lines.push(
+    `対象ページ: <${result.targetPageUrl}|${result.targetPageTitle}>`,
+  );
+  lines.push(`抽出期間: ${result.rangeFrom} 〜 ${result.rangeTo}`);
+  lines.push(
+    `生アイディア ${result.totalRawIdeas}件 → SF関連 ${result.sfIdeas.length}件`,
+  );
+  if (result.membersWithIdeas.length > 0) {
+    lines.push(`SFアイディア提供: ${result.membersWithIdeas.join(" / ")}`);
+  }
+  if (result.membersWithoutIdeas.length > 0) {
+    lines.push(`SF無し: ${result.membersWithoutIdeas.join(" / ")}`);
+  }
+  if (result.membersWithFetchError.length > 0) {
+    lines.push(`⚠️ 取得エラー: ${result.membersWithFetchError.join(" / ")}`);
+  }
+  return lines.join("\n");
+}
