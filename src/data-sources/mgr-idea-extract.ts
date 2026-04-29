@@ -56,12 +56,12 @@ interface ExtractResult {
   membersWithIdeas: string[];
   membersWithoutIdeas: string[];
   membersWithFetchError: string[];
+  notionWriteStatus: "success" | "skipped_no_api_key" | "failed";
+  notionWriteError?: string;
 }
 
-function getNotionClient(): Client {
-  if (!env.NOTION_API_KEY) {
-    throw new Error("NOTION_API_KEY is not set");
-  }
+function getNotionClient(): Client | null {
+  if (!env.NOTION_API_KEY) return null;
   return new Client({ auth: env.NOTION_API_KEY });
 }
 
@@ -98,6 +98,9 @@ async function listMgrPages(): Promise<
   { id: string; title: string; date: string; url: string }[]
 > {
   const notion = getNotionClient();
+  if (!notion) {
+    throw new Error("NOTION_API_KEY is not set");
+  }
   const results: { id: string; title: string; date: string; url: string }[] =
     [];
   let cursor: string | undefined = undefined;
@@ -378,6 +381,9 @@ async function replaceSection3(
   newBlocks: unknown[],
 ): Promise<void> {
   const notion = getNotionClient();
+  if (!notion) {
+    throw new Error("NOTION_API_KEY is not set");
+  }
 
   // すべてのトップレベルブロックを取得
   const allBlocks: { id: string; type: string; raw: unknown }[] = [];
@@ -447,31 +453,41 @@ async function replaceSection3(
 
 /**
  * 金曜抽出のメインエントリ。
+ *
+ * Notion API キーが未設定でも処理は走る（抽出だけ実施し、書き込みはスキップ）。
+ * Slackへの通知は呼び出し側で実施。
  */
 export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
-  // 1. MGR ページ一覧取得
-  const pages = await listMgrPages();
-  if (pages.length === 0) {
-    throw new Error("No MGR Weekly MTG pages found under 2026年度");
+  const hasNotion = !!env.NOTION_API_KEY;
+
+  // 1. MGR ページ一覧取得（Notion接続あれば）
+  let latestPage: { id: string; title: string; date: string; url: string } | null =
+    null;
+  let priorPage: { id: string; title: string; date: string; url: string } | null =
+    null;
+
+  if (hasNotion) {
+    const pages = await listMgrPages();
+    if (pages.length === 0) {
+      throw new Error("No MGR Weekly MTG pages found under 2026年度");
+    }
+    latestPage = pages[pages.length - 1];
+    priorPage = pages.length >= 2 ? pages[pages.length - 2] : null;
   }
 
-  // 2. 最新ページ(=次回MTG用)、前回ページ(=前回MTG)を特定
-  const latest = pages[pages.length - 1];
-  const prior = pages.length >= 2 ? pages[pages.length - 2] : null;
-
-  // 3. 抽出範囲: 前回MTG翌日 〜 今日。前回ページが無ければ過去7日。
+  // 2. 抽出範囲: 前回MTG翌日 〜 今日。前回ページが無ければ過去7日。
   const today = parseYmd(todayJst());
   let fromDate: Date;
-  if (prior) {
+  if (priorPage) {
     const priorDate = parseYmd(
-      `${prior.date.slice(0, 4)}-${prior.date.slice(4, 6)}-${prior.date.slice(6, 8)}`,
+      `${priorPage.date.slice(0, 4)}-${priorPage.date.slice(4, 6)}-${priorPage.date.slice(6, 8)}`,
     );
     fromDate = new Date(priorDate.getTime() + 24 * 3600 * 1000);
   } else {
     fromDate = new Date(today.getTime() - 7 * 24 * 3600 * 1000);
   }
 
-  // 4. 各メンバーの日報からH列を取得
+  // 3. 各メンバーの日報からH列を取得
   const allRawIdeas: RawIdea[] = [];
   const membersWithFetchError: string[] = [];
   const membersWithRawIdeas = new Set<string>();
@@ -487,7 +503,7 @@ export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
     }
   }
 
-  // 5. SF関連のみ抽出
+  // 4. SF関連のみ抽出
   const sfIdeas = await filterSfIdeas(allRawIdeas);
   const membersWithSfIdeas = new Set(sfIdeas.map((i) => i.member));
   const membersWithoutSfIdeas = MEMBERS.map((m) => m.name).filter(
@@ -495,9 +511,9 @@ export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
   );
 
   const result: ExtractResult = {
-    targetPageId: latest.id,
-    targetPageTitle: latest.title,
-    targetPageUrl: latest.url,
+    targetPageId: latestPage?.id || "",
+    targetPageTitle: latestPage?.title || "(Notion未連携)",
+    targetPageUrl: latestPage?.url || "",
     rangeFrom: fmtYmdSlash(fromDate),
     rangeTo: fmtYmdSlash(today),
     totalRawIdeas: allRawIdeas.length,
@@ -505,34 +521,87 @@ export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
     membersWithIdeas: Array.from(membersWithSfIdeas),
     membersWithoutIdeas: membersWithoutSfIdeas,
     membersWithFetchError,
+    notionWriteStatus: hasNotion ? "success" : "skipped_no_api_key",
   };
 
-  // 6. Notion セクション3 を上書き
-  const blocks = buildNotionBlocks(result);
-  await replaceSection3(latest.id, blocks);
+  // 5. Notion セクション3 を上書き（接続あれば）
+  if (hasNotion && latestPage) {
+    try {
+      const blocks = buildNotionBlocks(result);
+      await replaceSection3(latestPage.id, blocks);
+      result.notionWriteStatus = "success";
+    } catch (e) {
+      console.error("[MGR Idea Extract] Notion write failed:", e);
+      result.notionWriteStatus = "failed";
+      result.notionWriteError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   return result;
 }
 
-/** 結果を Slack 投稿用に整形 */
-export function formatExtractResultForSlack(result: ExtractResult): string {
+/** ヘッダー（サマリ部分のみ）を Slack mrkdwn で整形 */
+export function formatExtractSummaryForSlack(result: ExtractResult): string {
   const lines: string[] = [];
   lines.push("📥 *MGR金曜アイディア吸い上げ完了*");
-  lines.push(
-    `対象ページ: <${result.targetPageUrl}|${result.targetPageTitle}>`,
-  );
-  lines.push(`抽出期間: ${result.rangeFrom} 〜 ${result.rangeTo}`);
-  lines.push(
-    `生アイディア ${result.totalRawIdeas}件 → SF関連 ${result.sfIdeas.length}件`,
-  );
-  if (result.membersWithIdeas.length > 0) {
-    lines.push(`SFアイディア提供: ${result.membersWithIdeas.join(" / ")}`);
+
+  if (result.notionWriteStatus === "success" && result.targetPageUrl) {
+    lines.push(`Notion: <${result.targetPageUrl}|${result.targetPageTitle}> に書き込み済み`);
+  } else if (result.notionWriteStatus === "skipped_no_api_key") {
+    lines.push(
+      "Notion: _未連携のため書き込みスキップ_ → 下記内容を手動で「3.アイディアから吸い上げ」に転記してください",
+    );
+  } else if (result.notionWriteStatus === "failed") {
+    lines.push(
+      `⚠️ Notion書き込み失敗: \`${result.notionWriteError || "unknown"}\` → 下記内容を手動転記してください`,
+    );
   }
-  if (result.membersWithoutIdeas.length > 0) {
-    lines.push(`SF無し: ${result.membersWithoutIdeas.join(" / ")}`);
-  }
+
+  lines.push(`抽出期間: *${result.rangeFrom} 〜 ${result.rangeTo}*`);
+  lines.push(
+    `生アイディア *${result.totalRawIdeas}件* → SF関連 *${result.sfIdeas.length}件*`,
+  );
   if (result.membersWithFetchError.length > 0) {
     lines.push(`⚠️ 取得エラー: ${result.membersWithFetchError.join(" / ")}`);
   }
   return lines.join("\n");
+}
+
+/** SFアイディア本体を Slack mrkdwn で整形（メンバー別） */
+export function formatExtractDetailForSlack(result: ExtractResult): string {
+  const lines: string[] = [];
+
+  // メンバーごとにグループ化
+  const byMember = new Map<string, SfIdea[]>();
+  for (const idea of result.sfIdeas) {
+    if (!byMember.has(idea.member)) byMember.set(idea.member, []);
+    byMember.get(idea.member)!.push(idea);
+  }
+
+  // MEMBERS の順序で出力
+  for (const m of MEMBERS) {
+    const ideas = byMember.get(m.name);
+    if (!ideas || ideas.length === 0) continue;
+
+    lines.push(`\n*▼ ${m.name}*`);
+    for (const idea of ideas) {
+      const mmdd = idea.date.slice(5);
+      lines.push(`• *${mmdd} ${idea.headline}*`);
+      lines.push(`    ${idea.summary}`);
+    }
+  }
+
+  // フッター
+  if (result.membersWithoutIdeas.length > 0) {
+    lines.push(
+      `\n_今回SF無し:_ ${result.membersWithoutIdeas.join(" / ")}`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/** 旧API互換: サマリのみを返す */
+export function formatExtractResultForSlack(result: ExtractResult): string {
+  return formatExtractSummaryForSlack(result);
 }
