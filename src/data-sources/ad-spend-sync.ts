@@ -97,7 +97,7 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     pf: "ISWC",
     spreadsheetId: "1kfWz0n6z0iMR_X32sBwtp4jkfc5eIl782F3En0gGQxQ",
     tabFormat: "YYYYMM",
-    googleAdColumn: "AL",
+    googleAdColumn: "W",
     skipWrite: false,
     headerRows: 1,
   },
