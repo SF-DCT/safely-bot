@@ -8,7 +8,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 // タブ名フォーマット
-type TabFormat = "YYYY/M" | "YYYY年M月" | "YYYYMM";
+type TabFormat = "YYYY/M" | "YYYY/MM" | "YYYY年M月" | "YYYYMM";
 
 // PF別スプレッドシート設定
 interface PfSheetConfig {
@@ -102,6 +102,14 @@ const PROJECT_SHEET_CONFIG: PfSheetConfig[] = [
     headerRows: 1,
   },
   {
+    pf: "ISCB",
+    spreadsheetId: "1uEQ-Y_VU8Lyro2O3YI3UPuP_RsdvaYOEIwZ-CzXnpcs",
+    tabFormat: "YYYY/MM",
+    googleAdColumn: "Q",
+    skipWrite: false,
+    headerRows: 1,
+  },
+  {
     pf: "ISCL",
     spreadsheetId: "1Vtp78whqV26U8pIIU0nsK4BerNwZF2FHVcroCLCLQKs",
     tabFormat: "YYYY年M月",
@@ -120,6 +128,8 @@ export function getTabName(date: dayjs.Dayjs, format: TabFormat): string {
   switch (format) {
     case "YYYY/M":
       return `${date.year()}/${date.month() + 1}`;
+    case "YYYY/MM":
+      return date.format("YYYY/MM");
     case "YYYY年M月":
       return `${date.year()}年${date.month() + 1}月`;
     case "YYYYMM":
