@@ -12,8 +12,22 @@ import { readRange } from "./google-sheets.js";
 
 const PARENT_PAGE_ID = "33a0bcb6bd1080de80a0ca177138ca01"; // 2026年度
 
-// 抽出対象メンバー（DCT分は権限取得後に追加予定）
-const MEMBERS: { name: string; sheetId: string }[] = [
+// 抽出対象メンバー
+// format: "form" は Google フォーム回答シート（A=日付/H=アイディア/K=タイムスタンプ）
+// format: "freeform" は自由記述シート（タブ別・列構造別。member.range / member.ideaCol / member.dateCol を使う）
+type MemberFormat = "form" | "freeform";
+
+interface Member {
+  name: string;
+  sheetId: string;
+  format?: MemberFormat; // 省略時は "form"
+  // freeform 専用
+  range?: string;          // 例: "有泉!A2:E"
+  dateColIdx?: number;     // 0始まり 例: 0
+  ideaColIdx?: number;     // 0始まり 例: 2
+}
+
+const MEMBERS: Member[] = [
   { name: "吉井郁哉", sheetId: "1AQSP0P1zcbMozGKnvvfLRKkPeoS17nCLJgGLpQLVagU" },
   { name: "野室和佳子", sheetId: "17gW4_NsrF3loutiszMpvlMXTGkJe_po7PcKEK4IcMoU" },
   { name: "長嶺義博", sheetId: "1D1R5yG4UTtc5P_syxUlu1I_gIDTyC7H5ZG5QqfUBvao" },
@@ -28,6 +42,18 @@ const MEMBERS: { name: string; sheetId: string }[] = [
   { name: "小山和気", sheetId: "14Z9WASo5WvLyHuyyiJFFbfcS_BUwl84lNj5st9tWeTs" },
   { name: "倉本桃花", sheetId: "1EYSvnIysqAUnZW_WujRlWskfodUooWDz_MU6PQYIzvw" },
   { name: "小野寺真依", sheetId: "1YaLM63WQlsRgqKgVJsJSOaFt-60oejgkefhwQqHuT0U" },
+  { name: "会嶋翔", sheetId: "1fPRnM43EOlv7N_s4eF4VQjkcJpK8FWhFtP0YJs_1gv4" },
+  { name: "三浦良太", sheetId: "1yVdCV6poVIcYSeNfbnKD56mXfXMQuJYsVTPLnyhQKfM" },
+  { name: "芳賀ひかり", sheetId: "1yPXE-OTrVy_SImQMUTpOvgOPPrtFip76k2WM94q8Tog" },
+  { name: "田尾亜弥", sheetId: "11klaqmBX-TOJdykIAxdPuo-z2tVjz9eViZmi0ku64wo" },
+  {
+    name: "有泉",
+    sheetId: "1fasQEQUuNQyXH46lpwGK0d47fWCdT4McQ-z76reK_fQ",
+    format: "freeform",
+    range: "有泉!A2:E2000",
+    dateColIdx: 0,
+    ideaColIdx: 2,
+  },
 ];
 
 const SHEET_RANGE = "フォーム形式の回答!A1:K";
@@ -136,30 +162,55 @@ async function listMgrPages(): Promise<
 }
 
 /**
- * 指定シートの直近データから、from(inclusive) 〜 to(inclusive) のタイムスタンプ範囲の
- * H列(アイデアシンキング)を取得する。
+ * "M/D" / "MM/DD" / "YYYY/MM/DD" / "YYYY-MM-DD" を Date に変換。
+ * 年が省略されている場合は referenceDate の年を採用し、結果が referenceDate より未来になる場合は前年扱い。
  */
-async function fetchMemberIdeas(
-  member: { name: string; sheetId: string },
+function parseFreeformDate(s: string, referenceDate: Date): Date | null {
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+
+  // YYYY/MM/DD or YYYY-MM-DD
+  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(trimmed)) {
+    const d = parseYmd(trimmed.split(/[ T]/)[0]);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  // M/D (年省略)
+  const m = trimmed.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!m) return null;
+  const month = parseInt(m[1], 10);
+  const day = parseInt(m[2], 10);
+  let year = referenceDate.getUTCFullYear();
+  let candidate = new Date(Date.UTC(year, month - 1, day));
+  // 未来日になったら前年扱い（年初の年またぎ対策）
+  if (candidate.getTime() > referenceDate.getTime() + 24 * 3600 * 1000) {
+    year -= 1;
+    candidate = new Date(Date.UTC(year, month - 1, day));
+  }
+  return candidate;
+}
+
+/**
+ * Googleフォーム回答シート（A=日付/H=アイディア/K=タイムスタンプ）からアイディアを取得。
+ */
+async function fetchFormMemberIdeas(
+  member: Member,
   fromDate: Date,
   toDate: Date,
 ): Promise<RawIdea[]> {
   const rows = await readRange(member.sheetId, SHEET_RANGE);
   if (rows.length <= 1) return [];
 
-  // ヘッダー行(0)をスキップ
   const ideas: RawIdea[] = [];
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    const dateStr = row[0] || "";
     const idea = row[7] || ""; // H列
     const tsStr = row[10] || ""; // K列 タイムスタンプ "YYYY/MM/DD HH:MM:SS"
 
     if (!idea.trim()) continue;
     if (!tsStr) continue;
 
-    // タイムスタンプから日付抽出
-    const tsDate = tsStr.split(" ")[0]; // "YYYY/MM/DD"
+    const tsDate = tsStr.split(" ")[0];
     const ts = parseYmd(tsDate);
     if (Number.isNaN(ts.getTime())) continue;
 
@@ -174,6 +225,62 @@ async function fetchMemberIdeas(
   }
 
   return ideas;
+}
+
+/**
+ * 自由記述シート（A=日付 "M/D"、C=案 等、メンバーごとに列指定）からアイディアを取得。
+ */
+async function fetchFreeformMemberIdeas(
+  member: Member,
+  fromDate: Date,
+  toDate: Date,
+): Promise<RawIdea[]> {
+  if (
+    !member.range ||
+    member.dateColIdx === undefined ||
+    member.ideaColIdx === undefined
+  ) {
+    throw new Error(
+      `Freeform member ${member.name} missing range/dateColIdx/ideaColIdx`,
+    );
+  }
+  const rows = await readRange(member.sheetId, member.range);
+  if (rows.length === 0) return [];
+
+  const ideas: RawIdea[] = [];
+  for (const row of rows) {
+    const dateStr = row[member.dateColIdx] || "";
+    const idea = row[member.ideaColIdx] || "";
+    if (!idea.trim()) continue;
+    if (!dateStr.trim()) continue;
+
+    const d = parseFreeformDate(dateStr, toDate);
+    if (!d) continue;
+    if (d.getTime() < fromDate.getTime()) continue;
+    if (d.getTime() > toDate.getTime()) continue;
+
+    ideas.push({
+      member: member.name,
+      date: fmtYmdSlash(d),
+      idea: idea.trim(),
+    });
+  }
+  return ideas;
+}
+
+/**
+ * 指定メンバーの from(inclusive) 〜 to(inclusive) 範囲のアイディアを取得。
+ * シート構造ごとに分岐。
+ */
+async function fetchMemberIdeas(
+  member: Member,
+  fromDate: Date,
+  toDate: Date,
+): Promise<RawIdea[]> {
+  if (member.format === "freeform") {
+    return fetchFreeformMemberIdeas(member, fromDate, toDate);
+  }
+  return fetchFormMemberIdeas(member, fromDate, toDate);
 }
 
 /**
@@ -280,7 +387,7 @@ function buildNotionBlocks(result: ExtractResult): unknown[] {
         {
           type: "text",
           text: {
-            content: `抽出期間: ${fromLabel}〜${toLabel}　／　対象: 各メンバー日報「アイデアシンキング（5分）」欄からSF関連のみ抽出\n抽出範囲: ${memberCount}名分（DCTメンバーは権限取得後に追加予定）\nSF関連: ${result.sfIdeas.length}件 / 生アイディア: ${result.totalRawIdeas}件`,
+            content: `抽出期間: ${fromLabel}〜${toLabel}　／　対象: 各メンバー日報「アイデアシンキング（5分）」欄からSF関連のみ抽出\n抽出範囲: ${memberCount}名分\nSF関連: ${result.sfIdeas.length}件 / 生アイディア: ${result.totalRawIdeas}件`,
           },
         },
       ],
