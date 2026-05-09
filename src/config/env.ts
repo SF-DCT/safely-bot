@@ -53,6 +53,10 @@ const envSchema = z.object({
 
   // Orbit改修依頼フロー (Phase 1〜)
   GITHUB_TOKEN: z.string().optional(), // SF-DCT/cgs-crm への push & PR 用
+
+  // Orbit シナリオエンジン (mamo cutover Phase B 2026-05-09)
+  ORBIT_API_BASE: z.string().default("https://cgs-crm-production.up.railway.app"),
+  SCENARIO_API_TOKEN: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

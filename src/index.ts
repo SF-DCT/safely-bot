@@ -14,8 +14,8 @@ import { scheduleAdReport } from "./scheduler/ad-report.js";
 import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
 import { scheduleMgrIdeaExtract } from "./scheduler/mgr-idea-extract.js";
 import { initDatabase } from "./data-sources/database.js";
-import { seedScenarios } from "./scenario/seed.js";
-import { scheduleScenarioEngine } from "./scheduler/scenario-engine.js";
+// 2026-05-09: シナリオエンジンは Orbit (cgs-crm) に移管 (Phase B/C)。
+// mamo側の seed/engine 起動は廃止。tools経由でOrbit HTTP APIを叩く。
 import {
   sendBriefing,
   sendTestBriefing,
@@ -356,14 +356,13 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   botUserId = authResult.user_id || "";
   console.log(`🤖 Bot User ID: ${botUserId}`);
 
-  // シナリオエンジン初期化（DB接続 + シード）
+  // DB接続初期化 (Orbit改修依頼フロー用 — orbit_requestsテーブル等)
+  // シナリオエンジンはOrbit (cgs-crm) に移管済み (2026-05-09)。
   if (env.DATABASE_URL) {
     try {
       await initDatabase();
-      await seedScenarios();
-      scheduleScenarioEngine();
     } catch (e) {
-      console.error("[Startup] Scenario engine init failed:", e);
+      console.error("[Startup] Database init failed:", e);
     }
   }
 

@@ -1,19 +1,75 @@
+/**
+ * シナリオツール — Orbit AE のシナリオエンジンをSlack経由で操作する。
+ *
+ * Phase B (2026-05-09): 直接DB操作からOrbit HTTP APIへ移行。
+ * 旧: src/scenario/repository.ts (Neon DB直接)
+ * 新: ORBIT_API_BASE/ae/scenarios/api/* (Bearer token認証)
+ */
 import Anthropic from "@anthropic-ai/sdk";
-import {
-  listScenarios,
-  enrollContact,
-  getEnrollmentByEmail,
-  getAllActiveEnrollments,
-  cancelEnrollment,
-  getScenario,
-} from "../scenario/repository.js";
-import type { ScenarioStep } from "../scenario/types.js";
+import { env } from "../config/env.js";
+
+const ORBIT_API_BASE =
+  env.ORBIT_API_BASE || "https://cgs-crm-production.up.railway.app";
+const SCENARIO_API_TOKEN = env.SCENARIO_API_TOKEN || "";
+
+interface OrbitScenario {
+  id: string;
+  name: string;
+  description?: string;
+  steps_count: number;
+  steps_summary: string;
+}
+
+interface OrbitEnrollment {
+  id: string;
+  scenario_id: string;
+  scenario_name?: string;
+  contact_email: string;
+  contact_name?: string | null;
+  current_step: number;
+  status: string;
+  enrolled_at?: string;
+  next_execute_at?: string | null;
+}
+
+async function orbitGet<T>(path: string): Promise<T> {
+  if (!SCENARIO_API_TOKEN) {
+    throw new Error("SCENARIO_API_TOKEN is not set");
+  }
+  const res = await fetch(`${ORBIT_API_BASE}${path}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${SCENARIO_API_TOKEN}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Orbit API ${path} failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as T;
+}
+
+async function orbitPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  if (!SCENARIO_API_TOKEN) {
+    throw new Error("SCENARIO_API_TOKEN is not set");
+  }
+  const res = await fetch(`${ORBIT_API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SCENARIO_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json()) as { ok?: boolean; error?: string } & T;
+  if (!res.ok) {
+    return data; // 4xx でも JSON で error を返してくる前提
+  }
+  return data;
+}
 
 export const scenarioTools: Anthropic.Tool[] = [
   {
     name: "list_scenarios",
     description:
-      "利用可能なシナリオ（ドリップキャンペーン）の一覧を表示する。「シナリオ一覧」「どんなシナリオがある？」などのリクエストで使う。",
+      "Orbit AE で利用可能なシナリオ（ドリップキャンペーン）の一覧を表示する。「シナリオ一覧」「どんなシナリオがある？」などのリクエストで使う。",
     input_schema: {
       type: "object" as const,
       properties: {},
@@ -23,7 +79,7 @@ export const scenarioTools: Anthropic.Tool[] = [
   {
     name: "enroll_contact",
     description:
-      "連絡先をシナリオに登録する。メールアドレスとシナリオIDを指定する。「〇〇さんを資料請求フォローに登録して」「シナリオに追加して」などのリクエストで使う。",
+      "連絡先をOrbit AEのシナリオに登録する。メールアドレスとシナリオIDを指定する。「〇〇さんを資料請求フォローに登録して」「シナリオに追加して」などのリクエストで使う。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -51,7 +107,7 @@ export const scenarioTools: Anthropic.Tool[] = [
   {
     name: "check_enrollments",
     description:
-      "シナリオの登録状況を確認する。現在アクティブなシナリオ登録者の一覧を表示する。「シナリオの進捗は？」「誰がシナリオに入ってる？」などのリクエストで使う。",
+      "Orbit AE のシナリオ登録状況を確認する。現在アクティブなシナリオ登録者の一覧を表示する。「シナリオの進捗は？」「誰がシナリオに入ってる？」などのリクエストで使う。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -66,7 +122,7 @@ export const scenarioTools: Anthropic.Tool[] = [
   {
     name: "cancel_enrollment",
     description:
-      "シナリオ登録を解除する。メールアドレスとシナリオIDを指定する。「〇〇さんのシナリオ止めて」「シナリオ解除して」などのリクエストで使う。",
+      "Orbit AE のシナリオ登録を解除する。メールアドレスとシナリオIDを指定する。「〇〇さんのシナリオ止めて」「シナリオ解除して」などのリクエストで使う。",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -90,15 +146,14 @@ export async function executeScenarioTool(
 ): Promise<string> {
   switch (name) {
     case "list_scenarios": {
-      const scenarios = await listScenarios();
+      const scenarios = await orbitGet<OrbitScenario[]>("/ae/scenarios/api/list");
       if (scenarios.length === 0) return "登録されたシナリオはありません。";
 
       const lines = [`シナリオ一覧（${scenarios.length}件）\n`];
       for (const s of scenarios) {
-        const stepSummary = summarizeSteps(s.steps as ScenarioStep[]);
         lines.push(`■ ${s.name} (ID: ${s.id})`);
         if (s.description) lines.push(`  ${s.description}`);
-        lines.push(`  ステップ: ${stepSummary}`);
+        lines.push(`  ステップ: ${s.steps_summary}`);
         lines.push("");
       }
       return lines.join("\n");
@@ -110,59 +165,50 @@ export async function executeScenarioTool(
       const contactName = (input.name as string) || null;
       const company = (input.company as string) || undefined;
 
-      const scenario = await getScenario(scenarioId);
-      if (!scenario) return `シナリオ「${scenarioId}」が見つかりません。`;
-
-      const existing = await getEnrollmentByEmail(scenarioId, email);
-      if (existing) {
-        return `${email} は既にシナリオ「${scenario.name}」に登録済みです（ステップ ${existing.current_step + 1}）。`;
-      }
-
-      const contactData: Record<string, unknown> = {};
-      if (company) contactData.company = company;
-
-      // 最初のステップに応じて next_execute_at を計算
-      const steps = scenario.steps as ScenarioStep[];
-      const firstStep = steps[0];
-      const nextExecuteAt =
-        firstStep?.type === "wait"
-          ? new Date(Date.now() + firstStep.delay_days * 24 * 60 * 60 * 1000)
-          : new Date();
-
-      const enrollmentId = await enrollContact(
-        scenarioId,
+      const result = await orbitPost<{
+        ok: boolean;
+        enrollment_id?: string;
+        next_execute_at?: string;
+        error?: string;
+        current_step?: number;
+      }>("/ae/scenarios/api/enroll", {
+        scenario_id: scenarioId,
         email,
-        contactName,
-        contactData,
-        nextExecuteAt,
-      );
+        name: contactName,
+        company,
+      });
+
+      if (!result.ok) {
+        if (result.error === "already enrolled") {
+          return `${email} は既にシナリオ「${scenarioId}」に登録済みです（ステップ ${(result.current_step ?? 0) + 1}）。`;
+        }
+        return `登録に失敗しました: ${result.error ?? "unknown"}`;
+      }
 
       return [
         `✅ シナリオ登録完了`,
-        `シナリオ: ${scenario.name}`,
+        `シナリオID: ${scenarioId}`,
         `連絡先: ${contactName ?? email} (${email})`,
-        `登録ID: ${enrollmentId}`,
-        `最初のアクション: ${formatNextExecute(firstStep, nextExecuteAt)}`,
+        `登録ID: ${result.enrollment_id}`,
+        `次回実行: ${result.next_execute_at ?? "—"}`,
       ].join("\n");
     }
 
     case "check_enrollments": {
       const scenarioId = input.scenario_id as string | undefined;
-      const enrollments = await getAllActiveEnrollments();
-      const filtered = scenarioId
-        ? enrollments.filter((e) => e.scenario_id === scenarioId)
-        : enrollments;
+      const path = scenarioId
+        ? `/ae/scenarios/api/enrollments?scenario_id=${encodeURIComponent(scenarioId)}`
+        : "/ae/scenarios/api/enrollments";
+      const enrollments = await orbitGet<OrbitEnrollment[]>(path);
+      if (enrollments.length === 0) return "現在アクティブなシナリオ登録はありません。";
 
-      if (filtered.length === 0) return "現在アクティブなシナリオ登録はありません。";
-
-      const lines = [`アクティブな登録（${filtered.length}件）\n`];
-      for (const e of filtered) {
-        const scenario = await getScenario(e.scenario_id);
+      const lines = [`アクティブな登録（${enrollments.length}件）\n`];
+      for (const e of enrollments) {
         lines.push(
           `• ${e.contact_name ?? e.contact_email} (${e.contact_email})`,
         );
         lines.push(
-          `  シナリオ: ${scenario?.name ?? e.scenario_id} | ステップ ${e.current_step + 1} | 次回: ${e.next_execute_at ?? "完了待ち"}`,
+          `  シナリオ: ${e.scenario_name ?? e.scenario_id} | ステップ ${e.current_step + 1} | 次回: ${e.next_execute_at ?? "完了待ち"}`,
         );
       }
       return lines.join("\n");
@@ -171,42 +217,20 @@ export async function executeScenarioTool(
     case "cancel_enrollment": {
       const scenarioId = input.scenario_id as string;
       const email = input.email as string;
-
-      const enrollment = await getEnrollmentByEmail(scenarioId, email);
-      if (!enrollment) {
-        return `${email} はシナリオ「${scenarioId}」に登録されていません。`;
+      const result = await orbitPost<{ ok: boolean; error?: string }>(
+        "/ae/scenarios/api/cancel",
+        { scenario_id: scenarioId, email },
+      );
+      if (!result.ok) {
+        if (result.error === "enrollment not found") {
+          return `${email} はシナリオ「${scenarioId}」に登録されていません。`;
+        }
+        return `解除に失敗しました: ${result.error ?? "unknown"}`;
       }
-
-      await cancelEnrollment(enrollment.id);
       return `✅ ${email} のシナリオ登録を解除しました。`;
     }
 
     default:
       return `未知のシナリオツール: ${name}`;
   }
-}
-
-// --- Helpers ---
-
-function summarizeSteps(steps: ScenarioStep[]): string {
-  return steps
-    .map((s) => {
-      switch (s.type) {
-        case "wait":
-          return `${s.delay_days}日待機`;
-        case "email":
-          return "メール送信";
-        case "slack_notify":
-          return "Slack通知";
-      }
-    })
-    .join(" → ");
-}
-
-function formatNextExecute(step: ScenarioStep | undefined, date: Date): string {
-  if (!step) return "なし";
-  if (step.type === "wait") {
-    return `${step.delay_days}日後 (${date.toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" })})`;
-  }
-  return "即時実行";
 }
