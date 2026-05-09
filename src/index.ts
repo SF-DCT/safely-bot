@@ -388,7 +388,5 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   console.log("📊 Ad report: weekdays 9:05 JST");
   console.log("📥 MGR weekly idea extract: Fridays 14:00 JST");
   console.log(`🛰️ Orbit改修依頼フロー (Phase 1): @mamo mention in ${CGS_CHANNEL_ID}`);
-  if (env.DATABASE_URL) {
-    console.log("🔄 Scenario engine: every 5 minutes");
-  }
+  console.log(`🔄 Scenario engine: Orbit (${env.ORBIT_API_BASE}) — operated via tools`);
 })();
