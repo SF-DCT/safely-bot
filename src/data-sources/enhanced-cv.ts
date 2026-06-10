@@ -2,8 +2,10 @@ import { env } from "../config/env.js";
 import { createHash } from "crypto";
 
 // ============================================================
-// 拡張CV（Enhanced Conversions for Leads）
-// 電話番号ハッシュ方式で Salesforce 成約データを Google Ads にアップロード
+// 拡張CV（オフラインコンバージョンインポート）
+// gclid方式で Salesforce 成約データを Google Ads にアップロード
+// （旧: 電話番号ハッシュ方式 → 直接架電主体では照合先が無く計上ゼロのため2026-06-04にgclidへ切替）
+// アクション型 UPLOAD_CLICKS はgclidが正規の照合キー。GCLID__c != null の成約のみ送信する。
 // ============================================================
 
 const GOOGLE_ADS_CONFIG = {
@@ -52,6 +54,7 @@ const BRANDS: Record<string, BrandConfig> = {
 
 interface SfRecord {
   Id: string;
+  GCLID__c: string;
   PLA_Phone__c: string;
   StageName: string;
   Amount: number;
@@ -174,9 +177,9 @@ async function fetchSalesforceData(
   }
 
   const query =
-    `SELECT Id, PLA_Phone__c, StageName, Amount, CloseDate ` +
+    `SELECT Id, GCLID__c, PLA_Phone__c, StageName, Amount, CloseDate ` +
     `FROM Opportunity ` +
-    `WHERE PLA_Phone__c != null ` +
+    `WHERE GCLID__c != null ` +
     `AND Account.ChargeStore__c = '${brand.chargeStore}' ` +
     `AND StageName = '成立' ` +
     `AND Amount != null ` +
@@ -209,9 +212,9 @@ async function fetchSalesforceViaSfdx(
   const brand = BRANDS[brandCode];
 
   const query =
-    `SELECT Id, PLA_Phone__c, StageName, Amount, CloseDate ` +
+    `SELECT Id, GCLID__c, PLA_Phone__c, StageName, Amount, CloseDate ` +
     `FROM Opportunity ` +
-    `WHERE PLA_Phone__c != null ` +
+    `WHERE GCLID__c != null ` +
     `AND Account.ChargeStore__c = '${brand.chargeStore}' ` +
     `AND StageName = '成立' ` +
     `AND Amount != null ` +
@@ -235,17 +238,13 @@ async function uploadToGoogleAds(
   const brand = BRANDS[brandCode];
   const accessToken = await getAccessToken();
 
-  // ClickConversion オブジェクト配列を構築
+  // ClickConversion オブジェクト配列を構築（gclidを照合キーに使用）
   const conversions = records.map((r) => ({
     conversionAction: `customers/${brand.customerId}/conversionActions/${brand.conversionActionId}`,
+    gclid: r.GCLID__c,
     conversionDateTime: `${r.CloseDate} 12:00:00+09:00`,
     conversionValue: r.Amount,
     currencyCode: "JPY",
-    userIdentifiers: [
-      {
-        hashedPhoneNumber: hashPhone(r.PLA_Phone__c),
-      },
-    ],
   }));
 
   const response = await fetch(
