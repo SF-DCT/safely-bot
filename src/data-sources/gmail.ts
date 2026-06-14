@@ -443,3 +443,79 @@ export async function sendGmailReply(
     `Message ID: ${sendData.id}`,
   ].join("\n");
 }
+
+// --- ミラーサイト通知メールの送信失敗監視 ---
+
+export interface MirrorBounce {
+  id: string;
+  date: string;
+  subject: string;
+  snippet: string;
+}
+
+/**
+ * ミラーサイト通知メールの送信失敗を検知する。
+ *
+ * TC事業者ミラーの自動返信・事業者通知は takahashi@ の「Send mail as」エイリアス
+ * (toiretsumari.center@gmail.com) 経由で送られる。そのアプリパスワードが失効すると、
+ * GmailApp.sendEmail は実行時例外を出さないまま配信段階で 535 BadCredentials により
+ * 全ミラーの送信がサイレントにバウンスする。mailer-daemon からの該当バウンスを抽出する。
+ *
+ * 背景: 2026-06-13、アプリPW失効で全ミラー通知が約21時間サイレント停止した事故の再発防止。
+ */
+export async function findMirrorBounces(
+  windowHours: number = 2,
+): Promise<MirrorBounce[]> {
+  if (!GMAIL_CONFIG.refreshToken) {
+    console.warn("[MirrorBounce] GMAIL_REFRESH_TOKEN 未設定のため監視をスキップ。");
+    return [];
+  }
+
+  const accessToken = await getAccessToken();
+  const query = `from:mailer-daemon newer_than:${windowHours}h`;
+  const listUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=20`;
+
+  const listRes = await fetch(listUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const listData = (await listRes.json()) as {
+    messages?: Array<{ id: string }>;
+  };
+  if (!listData.messages || listData.messages.length === 0) return [];
+
+  // エイリアスのアプリPW失効を示すバウンスのマーカー
+  const FAILURE_MARKERS =
+    /BadCredentials|Username and Password not accepted|5\.7\.8/i;
+
+  const bounces: MirrorBounce[] = [];
+  for (const msg of listData.messages) {
+    const msgUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`;
+    const msgRes = await fetch(msgUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const msgData = (await msgRes.json()) as {
+      id: string;
+      threadId: string;
+      snippet?: string;
+      payload?: Record<string, unknown>;
+    };
+
+    const headers =
+      (msgData.payload?.headers as Array<{ name: string; value: string }>) ||
+      [];
+    const subject = extractHeader(headers, "Subject");
+    const body = msgData.payload ? extractBody(msgData.payload) : "";
+    const haystack = `${subject}\n${msgData.snippet || ""}\n${body}`;
+
+    if (!FAILURE_MARKERS.test(haystack)) continue;
+
+    bounces.push({
+      id: msgData.id,
+      date: extractHeader(headers, "Date"),
+      subject,
+      snippet: (msgData.snippet || body).slice(0, 200),
+    });
+  }
+
+  return bounces;
+}
