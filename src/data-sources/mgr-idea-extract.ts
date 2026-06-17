@@ -45,7 +45,7 @@ const MEMBERS: Member[] = [
   { name: "会嶋翔", sheetId: "1fPRnM43EOlv7N_s4eF4VQjkcJpK8FWhFtP0YJs_1gv4" },
   { name: "三浦良太", sheetId: "1yVdCV6poVIcYSeNfbnKD56mXfXMQuJYsVTPLnyhQKfM" },
   { name: "芳賀ひかり", sheetId: "1yPXE-OTrVy_SImQMUTpOvgOPPrtFip76k2WM94q8Tog" },
-  { name: "田尾亜弥", sheetId: "11klaqmBX-TOJdykIAxdPuo-z2tVjz9eViZmi0ku64wo" },
+  { name: "森亜弥", sheetId: "11klaqmBX-TOJdykIAxdPuo-z2tVjz9eViZmi0ku64wo" }, // 旧姓: 田尾亜弥 / メール tao@safely.co.jp は変更なし
   {
     name: "有泉",
     sheetId: "1fasQEQUuNQyXH46lpwGK0d47fWCdT4McQ-z76reK_fQ",
@@ -563,9 +563,17 @@ async function replaceSection3(
  *
  * Notion API キーが未設定でも処理は走る（抽出だけ実施し、書き込みはスキップ）。
  * Slackへの通知は呼び出し側で実施。
+ *
+ * options で fromDate / toDate を明示すると、Notion ページ参照なしで任意期間を抽出できる
+ * (アドホックな過去分取り直しに使う)。
  */
-export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
+export async function extractWeeklyMgrIdeas(options?: {
+  fromDate?: Date;
+  toDate?: Date;
+  skipNotionWrite?: boolean;
+}): Promise<ExtractResult> {
   const hasNotion = !!env.NOTION_API_KEY;
+  const skipNotionWrite = options?.skipNotionWrite === true;
 
   // 1. MGR ページ一覧取得（Notion接続あれば）
   let latestPage: { id: string; title: string; date: string; url: string } | null =
@@ -582,10 +590,12 @@ export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
     priorPage = pages.length >= 2 ? pages[pages.length - 2] : null;
   }
 
-  // 2. 抽出範囲: 前回MTG翌日 〜 今日。前回ページが無ければ過去7日。
-  const today = parseYmd(todayJst());
+  // 2. 抽出範囲: options 優先 → 前回MTG翌日 〜 今日 → 過去7日 の順
+  const today = options?.toDate ?? parseYmd(todayJst());
   let fromDate: Date;
-  if (priorPage) {
+  if (options?.fromDate) {
+    fromDate = options.fromDate;
+  } else if (priorPage) {
     const priorDate = parseYmd(
       `${priorPage.date.slice(0, 4)}-${priorPage.date.slice(4, 6)}-${priorPage.date.slice(6, 8)}`,
     );
@@ -631,8 +641,8 @@ export async function extractWeeklyMgrIdeas(): Promise<ExtractResult> {
     notionWriteStatus: hasNotion ? "success" : "skipped_no_api_key",
   };
 
-  // 5. Notion セクション3 を上書き（接続あれば）
-  if (hasNotion && latestPage) {
+  // 5. Notion セクション3 を上書き（接続あれば、かつ skipNotionWrite が false）
+  if (hasNotion && latestPage && !skipNotionWrite) {
     try {
       const blocks = buildNotionBlocks(result);
       await replaceSection3(latestPage.id, blocks);

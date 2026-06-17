@@ -34,7 +34,7 @@ export const EMAIL_CONTEXT = `
 | CMS | Web Support | 長嶺義博 | |
 | DCT | Manager | 会嶋翔 | |
 | DCT | Engineer | ライオン | |
-| DCT | Web Dir | 芳賀ひかり、田尾亜弥、三浦良太 | |
+| DCT | Web Dir | 芳賀ひかり、森亜弥、三浦良太 | 森亜弥=旧姓田尾（メールは tao@safely.co.jp のまま） |
 | EPO | Web Dir | 有泉裕貴 | |
 | BOF | | 広瀬千尋、穴見美絵 | 総務 |
 | HR | Section Chief | 近野裕太 | 人事 |
