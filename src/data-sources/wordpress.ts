@@ -210,6 +210,75 @@ export async function getMemberReviews(query: string): Promise<string> {
   }
 }
 
+// ---------- 口コミ (wpcr3_review) ----------
+
+export interface TCReviewRaw {
+  id: number;
+  date: string; // JSTローカル (例: 2026-07-01T08:13:40)
+  status: string;
+  link: string;
+  title?: { rendered: string };
+  content?: { rendered: string };
+  acf?: {
+    wpcr3_review_code?: string;
+    wpcr3_review_prefecture?: string;
+    wpcr3_file1?: string | false;
+    wpcr3_file2?: string | false;
+    wpcr3_file3?: string | false;
+    wpcr3_invoice1?: string | false;
+    [key: string]: unknown;
+  };
+  meta_data?: {
+    wpcr3_review_name?: string;
+    wpcr3_review_title?: string;
+    wpcr3_review_rating?: string;
+    wpcr3_f1?: string; // 修理内容
+    wpcr3_f2?: string; // 支払った料金帯
+    [key: string]: unknown;
+  };
+  vendor?: { id: number; title: string };
+}
+
+/**
+ * 指定日時以降に投稿された口コミを新しい順で取得する（口コミ監視用）
+ * @param afterIso サイトローカル(JST)のISO日時 例: 2026-06-25T00:00:00
+ */
+export async function fetchRecentReviews(
+  afterIso: string,
+  perPage = 50,
+): Promise<TCReviewRaw[]> {
+  return wpFetch<TCReviewRaw[]>("/reviews", {
+    per_page: String(perPage),
+    orderby: "date",
+    order: "desc",
+    after: afterIso,
+    _fields: "id,date,status,link,title,content,acf,meta_data,vendor",
+  });
+}
+
+const memberLinkCache = new Map<number, string | null>();
+
+/**
+ * メンバー（事業者）ページURLをIDから取得（プロセス内キャッシュ付き）
+ */
+export async function getMemberPageLink(
+  memberId: number,
+): Promise<string | null> {
+  const cached = memberLinkCache.get(memberId);
+  if (cached !== undefined) return cached;
+  try {
+    const m = await wpFetch<{ link?: string }>(`/member/${memberId}`, {
+      _fields: "link",
+    });
+    const link = m?.link || null;
+    memberLinkCache.set(memberId, link);
+    return link;
+  } catch {
+    memberLinkCache.set(memberId, null);
+    return null;
+  }
+}
+
 /**
  * メンバーの詳細情報を取得（全ACFフィールド）
  */

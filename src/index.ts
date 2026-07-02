@@ -14,6 +14,7 @@ import { scheduleAdReport } from "./scheduler/ad-report.js";
 import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
 import { scheduleMgrIdeaExtract } from "./scheduler/mgr-idea-extract.js";
 import { scheduleMirrorBounceCheck } from "./scheduler/mirror-bounce-check.js";
+import { scheduleReviewWatch } from "./scheduler/review-watch.js";
 import { initDatabase } from "./data-sources/database.js";
 // 2026-05-09: シナリオエンジンは Orbit (cgs-crm) に移管 (Phase B/C)。
 // mamo側の seed/engine 起動は廃止。tools経由でOrbit HTTP APIを叩く。
@@ -375,6 +376,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   scheduleAdReport();
   scheduleMgrIdeaExtract();
   scheduleMirrorBounceCheck();
+  scheduleReviewWatch();
   // schedulePendingThreadsCheck(); // 一時停止 2026-04-17 精度改善のため回収
 
   await app.start();
@@ -390,6 +392,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   console.log("📊 Ad report: weekdays 9:05 JST");
   console.log("📥 MGR weekly idea extract: Fridays 14:00 JST");
   console.log("🚨 Mirror bounce check: every 30 min (24/7)");
+  console.log("💬 TC review watch: every 15 min (24/7)");
   console.log(`🛰️ Orbit改修依頼フロー (Phase 1): @mamo mention in ${CGS_CHANNEL_ID}`);
   console.log(`🔄 Scenario engine: Orbit (${env.ORBIT_API_BASE}) — operated via tools`);
 })();
