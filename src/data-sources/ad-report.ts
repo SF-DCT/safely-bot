@@ -3,10 +3,9 @@ import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 import { readRange } from "./google-sheets.js";
 import {
-  PROJECT_SHEET_CONFIG,
+  ACTIVE_PF_CONFIG,
   getTabName,
   getRowForDay,
-  type PfSheetConfig,
 } from "./ad-spend-sync.js";
 
 dayjs.extend(utc);
@@ -16,7 +15,7 @@ dayjs.extend(timezone);
 const BUDGET_SHEET_ID =
   "18NEKSUcCLUnhN6_Ah8dyFeybqX_whduYF1Uh90MYkT4";
 
-// 予算シートのPFカラム順（C列〜O列）
+// 予算シートのPFカラム順（C列〜P列 / 17行目のPFコード行と一致させること）
 const BUDGET_PF_ORDER = [
   "SKH",
   "SKH-H",
@@ -29,11 +28,12 @@ const BUDGET_PF_ORDER = [
   "ISCL",
   "ISMS",
   "ISWC",
+  "ISCB",
   "BF",
   "BP",
 ];
 
-// PF別の問合せ列マッピング
+// PF別の問合せ列マッピング（各PFシートの「Total(問)」相当の列）
 const INQUIRY_COLUMN: Record<string, string> = {
   SKH: "E",
   "SKH-H": "E",
@@ -44,7 +44,8 @@ const INQUIRY_COLUMN: Record<string, string> = {
   ND: "E",
   KM: "E",
   ISMS: "J",
-  ISWC: "P",
+  ISWC: "F",
+  ISCB: "G",
   ISCL: "M",
 };
 
@@ -53,14 +54,15 @@ const INQUIRY_COLUMN: Record<string, string> = {
 const GOOGLE_AD_COLUMN: Record<string, string> = {
   SKH: "V",
   "SKH-H": "V",
-  SKT: "T",
+  SKT: "U",
   "SKT-N": "U",
   ES: "W",
-  OL: "W",
+  OL: "X",
   ND: "S",
   KM: "S",
   ISMS: "Z",
-  ISWC: "AL",
+  ISWC: "W",
+  ISCB: "Q",
   ISCL: "AF", // ISCLのGoogle合計広告費列
 };
 
@@ -105,7 +107,7 @@ async function readProjectData(
 
   const results: PfDailyData[] = [];
 
-  for (const config of PROJECT_SHEET_CONFIG) {
+  for (const config of ACTIVE_PF_CONFIG) {
     const tab = getTabName(date, config.tabFormat);
     const googleCol = GOOGLE_AD_COLUMN[config.pf];
     const inquiryCol = INQUIRY_COLUMN[config.pf];
@@ -183,11 +185,14 @@ async function readBudgetConsumption(
 ): Promise<BudgetData[]> {
   const tab = `${date.year()}/${date.month() + 1}`;
 
+  // 広告運用中のPFのみ対象（停止中PF・mamo管理外のBF/BPは除外）
+  const activePfs = new Set(ACTIVE_PF_CONFIG.map((c) => c.pf));
+
   try {
-    // 予算消化率(月着地予測換算) = row 30, C〜O列
+    // 予算消化率(月着地予測換算) = row 30, C〜P列
     const data = await readRange(
       BUDGET_SHEET_ID,
-      `'${tab}'!C30:O30`,
+      `'${tab}'!C30:P30`,
     );
 
     if (!data[0]) return [];
@@ -195,7 +200,7 @@ async function readBudgetConsumption(
     return BUDGET_PF_ORDER.map((pf, i) => ({
       pf,
       budgetRate: parsePercent(data[0][i]),
-    })).filter((d) => d.pf !== "BF" && d.pf !== "BP");
+    })).filter((d) => activePfs.has(d.pf));
   } catch (e) {
     console.error(
       "[AdReport] Budget data read failed:",
