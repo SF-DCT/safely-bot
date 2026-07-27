@@ -65,22 +65,41 @@ export async function executeGaql(
   );
 
   const data = await response.json();
-  if (data.error) {
-    throw new Error(
-      `Google Ads API error: ${data.error.message || JSON.stringify(data.error)}`,
-    );
-  }
 
-  // searchStream returns array of batches
+  // searchStream はエラー時も配列で返る（[{ error: {...} }]）。
+  // batch.results だけを拾うとクエリエラーが「0件」として握りつぶされるため、
+  // トップレベル・バッチ内のどちらのエラーも必ず throw する。
+  const batches: unknown[] = Array.isArray(data) ? data : [data];
+
   const results: unknown[] = [];
-  if (Array.isArray(data)) {
-    for (const batch of data) {
-      if (batch.results) {
-        results.push(...batch.results);
-      }
+  for (const batch of batches) {
+    const b = batch as { error?: unknown; results?: unknown[] };
+    if (b.error) {
+      throw new Error(`Google Ads API error: ${formatGaqlError(b.error)}`);
+    }
+    if (b.results) {
+      results.push(...b.results);
     }
   }
   return results;
+}
+
+/** GoogleAdsFailure から原因（フィールド名・エラーコード）まで取り出す */
+function formatGaqlError(error: unknown): string {
+  const e = error as {
+    message?: string;
+    details?: Array<{ errors?: Array<{ message?: string }> }>;
+  };
+
+  const detailMessages = (e.details || [])
+    .flatMap((d) => d.errors || [])
+    .map((x) => x.message)
+    .filter((m): m is string => Boolean(m));
+
+  if (detailMessages.length > 0) {
+    return detailMessages.join(" / ");
+  }
+  return e.message || JSON.stringify(error);
 }
 
 // アカウントコードを解決
