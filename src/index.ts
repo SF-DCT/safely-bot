@@ -371,7 +371,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   // scheduleIntelligenceBriefing(); // 一時停止 2026-04-21 精度改善のため回収
   // scheduleGmailCheck(); // 一時停止 2026-04-17 精度改善のため回収
   // scheduleDailyReport(); // 一時停止 2026-04-17 精度改善のため回収
-  scheduleEnhancedCvUpload();
+  // scheduleEnhancedCvUpload(); // 一時停止 2026-08-05 難波さん側でCV設定を進めるため（二重アップロード防止）
   scheduleAdSpendSync();
   scheduleAdReport();
   scheduleMgrIdeaExtract();
@@ -387,7 +387,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   //   console.log("📬 Gmail check: weekdays 8:30 JST"); // 一時停止
   //   console.log("💬 Pending threads check: weekdays 9:30 JST"); // 一時停止
   //   console.log("📝 Daily report: weekdays 19:00 JST"); // 一時停止
-  console.log("📊 Enhanced CV upload: weekdays 9:00 JST");
+  // console.log("📊 Enhanced CV upload: weekdays 9:00 JST"); // 一時停止 2026-08-05
   console.log("📈 Ad spend sync: weekdays 8:00 JST");
   console.log("📊 Ad report: weekdays 9:05 JST");
   console.log("📥 MGR weekly idea extract: Fridays 14:00 JST");
