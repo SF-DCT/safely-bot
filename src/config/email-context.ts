@@ -6,7 +6,7 @@
  */
 export const EMAIL_CONTEXT = `
 ## あなたの立場
-高橋幹佳 — 株式会社SAFELY BGS（事業成長戦略）部門 General Manager
+高橋幹佳 — 株式会社SAFELY 執行役員（2026-10-01就任）／ BSG（事業成長戦略チーム）General Manager
 メールアドレス: takahashi@safely.co.jp
 
 ## 会社概要
@@ -21,7 +21,9 @@ export const EMAIL_CONTEXT = `
 
 | チーム | 役職 | 氏名 | 備考 |
 |--------|------|------|------|
-| BGS | GM | 高橋幹佳 | 自分 |
+| BSG | 執行役員 / GM | 高橋幹佳 | 自分 |
+| BSG | Web Dir | 有泉裕貴 | 高橋の部下（2026-08 EPOから異動） |
+| BSG | マーケ推進 | 鐘ヶ江美星 | 高橋の部下（2026-10-01入社） |
 | CGS | Manager | 吉井郁哉 | |
 | CGS | Sales | 小山和樹 | |
 | CGS | Sales | 柿沼佑 | |
@@ -29,13 +31,11 @@ export const EMAIL_CONTEXT = `
 | CGS | Link Building | 中岡正年 | |
 | CTS | Manager | 長澤裕輔 | |
 | CTS | Content Dir | 目黒真弓、藤井樹、久保木彩子 | |
-| CMS | Manager | 野室和佳子 | |
+| CMS | Manager | 野室和佳子 | 2026-07末から産休中 |
 | CMS | Marketing | 永岡顕一 | |
-| CMS | Web Support | 長嶺義博 | |
 | DCT | Manager | 会嶋翔 | |
-| DCT | Engineer | ライオン | |
 | DCT | Web Dir | 芳賀ひかり、森亜弥、三浦良太 | 森亜弥=旧姓田尾（メールは tao@safely.co.jp のまま） |
-| EPO | Web Dir | 有泉裕貴 | |
+| TDS | Engineer | ライオン | |
 | BOF | | 広瀬千尋、穴見美絵 | 総務 |
 | HR | Section Chief | 近野裕太 | 人事 |
 | 代表 | 代表取締役 | 岡野健二 | |

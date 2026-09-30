@@ -8,11 +8,11 @@ import { getClaudeClient } from "../utils/claude-client.js";
 import { formatDateJapanese } from "../utils/date-formatter.js";
 import type { WebSearchResult } from "./web-search.js";
 
-const CURATE_SYSTEM_PROMPT = `あなたはSAFELY社の事業成長戦略チームGM（高橋幹佳）のAI秘書です。
+const CURATE_SYSTEM_PROMPT = `あなたはSAFELY社の執行役員・事業成長戦略チーム（BSG）GM（高橋幹佳）のAI秘書です。
 収集された記事・投稿のリストを分析し、高橋さんが今日読むべき重要な情報を選別・要約してください。
 
 ## 高橋さんのコンテキスト
-- 株式会社SAFELY 事業成長戦略チーム ジェネラルマネージャー
+- 株式会社SAFELY 執行役員（2026-10-01就任）／ 事業成長戦略チーム（BSG）ジェネラルマネージャー
 - セーフリー（safely.co.jp）: 暮らし系11カテゴリの口コミ比較プラットフォーム運営
 - 受託クライアントのWebマーケティング支援（SEO・広告運用）
 - AI秘書サービスの新規事業開発中（Claude Code活用）
