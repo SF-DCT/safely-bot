@@ -82,7 +82,11 @@ interface ThreadGroup {
   requesterId: string;
   permalink?: string;
   messages: { user: string; text: string; ts: string }[];
+  partial?: boolean; // 検索から復元した（他の人同士の発言を含まない）
 }
+
+const PARTIAL_NOTE =
+  "※ 検索から復元したやり取りです（高橋さん宛ての投稿と高橋さん本人の投稿のみ。他の人同士の発言は含みません）";
 
 interface Classified {
   index: number;
@@ -119,8 +123,10 @@ export async function runWorkScan(
     : new Date(Date.now() - BACKFILL_DAYS * 24 * 60 * 60 * 1000);
   const scanStartedAt = new Date().toISOString();
 
-  const groups = await collectGroups(userClient, since);
-  console.log(`[WorkInbox] ${groups.length} thread groups collected`);
+  const { groups, requestCount } = await collectGroups(userClient, botClient, since);
+  console.log(
+    `[WorkInbox] ${groups.length} thread groups collected (${requestCount} request messages)`,
+  );
 
   // 既に扱った依頼は、より新しい依頼メッセージが来ていない限り仕分け直さない
   const fresh: ThreadGroup[] = [];
@@ -158,66 +164,105 @@ export async function runWorkScan(
     UPDATE work_items SET status = 'backlog', updated_at = NOW()
     WHERE status = 'snoozed' AND snooze_until <= NOW()
   `;
-  await setKv("work_inbox_last_scan", scanStartedAt);
+  // 依頼メッセージはあったのに1件もまとめられなかった場合は、次回も同じ期間を見直す
+  if (groups.length > 0 || requestCount === 0) {
+    await setKv("work_inbox_last_scan", scanStartedAt);
+  }
 
   const posted = await postDigest(botClient, opts.manual === true);
   return `依頼の仕分けが完了しました（新規・更新 ${targets.length}件中、未対応の依頼 ${openCount}件）。提案カードを ${posted}件送りました。`;
 }
 
+interface SearchMsg {
+  channelId: string;
+  channelName: string;
+  isDm: boolean;
+  threadTs: string;
+  ts: string;
+  user: string;
+  text: string;
+  permalink?: string;
+}
+
+/** search.messages の結果を、スレッドの親 ts 付きで平らにする */
+async function searchAll(
+  userClient: WebClient,
+  query: string,
+  maxPages: number,
+): Promise<SearchMsg[]> {
+  const out: SearchMsg[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const result = await userClient.search.messages({
+      query,
+      sort: "timestamp",
+      sort_dir: "desc",
+      count: 100,
+      page,
+    });
+    for (const match of result.messages?.matches || []) {
+      const raw = match as Record<string, unknown>;
+      const ch = raw.channel as Record<string, unknown> | undefined;
+      const channelId = ch?.id as string | undefined;
+      const ts = match.ts || "";
+      if (!channelId || !match.user || !ts) continue; // Bot 投稿は user がない
+      out.push({
+        channelId,
+        channelName: ch?.is_im === true ? "DM" : (ch?.name as string) || "unknown",
+        isDm: ch?.is_im === true,
+        threadTs:
+          (raw.thread_ts as string) || threadTsFromPermalink(match.permalink) || ts,
+        ts,
+        user: match.user,
+        text: (match.text || "").slice(0, 800),
+        permalink: match.permalink,
+      });
+    }
+    const pages = result.messages?.paging?.pages || 1;
+    if (page >= pages) break;
+    await sleep(1500); // search.messages は Tier 2
+  }
+  return out;
+}
+
 async function collectGroups(
   userClient: WebClient,
+  botClient: WebClient,
   since: Date,
-): Promise<ThreadGroup[]> {
+): Promise<{ groups: ThreadGroup[]; requestCount: number }> {
+  // after: は指定日を含まないため1日前を渡す
   const after = new Date(since.getTime() - 24 * 60 * 60 * 1000)
     .toISOString()
     .split("T")[0];
-  // after: は指定日を含まないため1日前を渡す
-  const queries = [`<@${SLACK_USER_ID}> after:${after}`, `to:me after:${after}`];
+  const inWindow = (m: SearchMsg) => Number(m.ts) * 1000 >= since.getTime();
 
+  const toMe = [
+    ...(await searchAll(userClient, `<@${SLACK_USER_ID}> after:${after}`, 3)),
+    ...(await searchAll(userClient, `to:me after:${after}`, 3)),
+  ].filter((m) => inWindow(m) && m.user !== SLACK_USER_ID && m.user !== MAMO_BOT_USER_ID);
+  // 高橋さん本人の投稿（既に返したかの判定と、DM のやり取りの復元に使う）
+  const mine = await searchAll(userClient, `from:me after:${after}`, 5);
+
+  const timeline = new Map<string, SearchMsg[]>();
+  for (const m of [...toMe, ...mine]) {
+    const list = timeline.get(m.channelId) || [];
+    if (!list.some((x) => x.ts === m.ts)) list.push(m);
+    timeline.set(m.channelId, list);
+  }
+
+  // DM は「相手×日付」、チャンネルは「スレッドの親」を1件の依頼として扱う
   const groups = new Map<string, ThreadGroup>();
-  for (const query of queries) {
-    for (let page = 1; page <= 3; page++) {
-      const result = await userClient.search.messages({
-        query,
-        sort: "timestamp",
-        sort_dir: "desc",
-        count: 100,
-        page,
-      });
-      const matches = result.messages?.matches || [];
-      for (const match of matches) {
-        const raw = match as Record<string, unknown>;
-        const ch = raw.channel as Record<string, unknown> | undefined;
-        const channelId = ch?.id as string | undefined;
-        const user = match.user;
-        const ts = match.ts || "";
-        if (!channelId || !user || !ts) continue; // Bot 投稿は user がない
-        if (user === SLACK_USER_ID || user === MAMO_BOT_USER_ID) continue;
-        if (Number(ts) * 1000 < since.getTime()) continue;
-
-        // DM は「相手×日付」、チャンネルは「スレッドの親」を1件の依頼として扱う
-        const isDm = ch?.is_im === true;
-        const threadTs =
-          (raw.thread_ts as string) || threadTsFromPermalink(match.permalink) || ts;
-        const id = isDm
-          ? `${channelId}-d${jstDateKey(ts)}`
-          : `${channelId}-${threadTs}`;
-        mergeGroup(groups, {
-          id,
-          channelId,
-          channelName: isDm ? "DM" : (ch?.name as string) || "unknown",
-          isDm,
-          threadTs: isDm ? ts : threadTs,
-          requestTs: ts,
-          requesterId: user,
-          permalink: match.permalink,
-          messages: [],
-        });
-      }
-      const pages = result.messages?.paging?.pages || 1;
-      if (page >= pages) break;
-      await sleep(1500); // search.messages は Tier 2
-    }
+  for (const m of toMe) {
+    mergeGroup(groups, {
+      id: m.isDm ? `${m.channelId}-d${jstDateKey(m.ts)}` : `${m.channelId}-${m.threadTs}`,
+      channelId: m.channelId,
+      channelName: m.channelName,
+      isDm: m.isDm,
+      threadTs: m.isDm ? m.ts : m.threadTs,
+      requestTs: m.ts,
+      requesterId: m.user,
+      permalink: m.permalink,
+      messages: [],
+    });
   }
 
   // 新しい順に上限まで本文を取得。スレッドの親が判明したら同じ依頼をまとめ直す
@@ -226,25 +271,29 @@ async function collectGroups(
   );
   const resolved = new Map<string, ThreadGroup>();
   for (const g of sorted.slice(0, MAX_GROUPS_PER_SCAN + 20)) {
-    try {
-      const { messages, rootTs } = await fetchContext(userClient, g);
-      if (messages.length === 0) continue;
+    const { messages, rootTs, partial, calledApi } = await fetchContext(
+      userClient,
+      botClient,
+      g,
+      timeline.get(g.channelId) || [],
+    );
+    if (messages.length > 0) {
       if (!g.isDm && rootTs && rootTs !== g.threadTs) {
         g.threadTs = rootTs;
         g.id = `${g.channelId}-${rootTs}`;
       }
       g.messages = messages;
+      g.partial = partial;
       mergeGroup(resolved, g);
-    } catch (e) {
-      console.log(
-        `[WorkInbox] context fetch skipped ${g.id}: ${e instanceof Error ? e.message : String(e)}`,
-      );
     }
-    await sleep(1200); // conversations.replies / history は Tier 3（50回/分）
+    if (calledApi) await sleep(1200); // conversations.replies は Tier 3（50回/分）
   }
-  return [...resolved.values()].sort(
-    (a, b) => Number(b.requestTs) - Number(a.requestTs),
-  );
+  return {
+    groups: [...resolved.values()].sort(
+      (a, b) => Number(b.requestTs) - Number(a.requestTs),
+    ),
+    requestCount: toMe.length,
+  };
 }
 
 function mergeGroup(groups: Map<string, ThreadGroup>, g: ThreadGroup): void {
@@ -265,41 +314,60 @@ function mergeGroup(groups: Map<string, ThreadGroup>, g: ThreadGroup): void {
 }
 
 /**
- * チャンネルはスレッド全体、DM はその日のやり取り（＋翌日昼まで）を取る
- * （高橋さんが既に返したか・完了したかの判定材料）
+ * 高橋さんが既に返したか・完了したかの判定材料を集める。
+ * ユーザートークンは公開チャンネルの履歴しか読めない（groups/im/mpim:history なし）ため、
+ * ① 公開チャンネル＝ユーザートークン ② 非公開＝Bot（参加していれば）
+ * ③ それ以外（DM など）＝検索結果から復元（高橋さん宛てと本人の投稿だけ）の順に取る。
  */
 async function fetchContext(
   userClient: WebClient,
+  botClient: WebClient,
   g: ThreadGroup,
-): Promise<{ messages: { user: string; text: string; ts: string }[]; rootTs?: string }> {
+  timeline: SearchMsg[],
+): Promise<{
+  messages: { user: string; text: string; ts: string }[];
+  rootTs?: string;
+  partial: boolean;
+  calledApi: boolean;
+}> {
   const toMsg = (m: { user?: string; bot_id?: string; text?: string; ts?: string }) => ({
     user: m.user || (m.bot_id ? "bot" : "unknown"),
     text: (m.text || "").slice(0, 800),
     ts: m.ts || "",
   });
 
-  if (g.isDm) {
-    const dayStart = jstDayStartTs(g.requestTs);
-    const history = await userClient.conversations.history({
-      channel: g.channelId,
-      oldest: String(dayStart),
-      latest: String(dayStart + 36 * 3600),
-      limit: 40,
-    });
-    const messages = (history.messages || [])
-      .map(toMsg)
-      .sort((a, b) => Number(a.ts) - Number(b.ts));
-    return { messages: messages.slice(-20) };
+  if (!g.isDm) {
+    for (const client of [userClient, botClient]) {
+      try {
+        const replies = await client.conversations.replies({
+          channel: g.channelId,
+          ts: g.threadTs,
+          limit: 30,
+        });
+        const raw = replies.messages || [];
+        if (raw.length === 0) continue;
+        const rootTs = raw[0]?.thread_ts || raw[0]?.ts;
+        return { messages: raw.map(toMsg).slice(-15), rootTs, partial: false, calledApi: true };
+      } catch {
+        // 読めない（権限なし・未参加）→ 次の手段へ
+      }
+    }
   }
 
-  const replies = await userClient.conversations.replies({
-    channel: g.channelId,
-    ts: g.threadTs,
-    limit: 30,
-  });
-  const raw = replies.messages || [];
-  const rootTs = raw[0]?.thread_ts || raw[0]?.ts;
-  return { messages: raw.map(toMsg).slice(-15), rootTs };
+  let picked: SearchMsg[];
+  if (g.isDm) {
+    const dayStart = jstDayStartTs(g.requestTs);
+    picked = timeline.filter(
+      (m) => Number(m.ts) >= dayStart && Number(m.ts) < dayStart + 36 * 3600,
+    );
+  } else {
+    picked = timeline.filter((m) => m.threadTs === g.threadTs || m.ts === g.threadTs);
+  }
+  const messages = picked
+    .sort((a, b) => Number(a.ts) - Number(b.ts))
+    .slice(-20)
+    .map((m) => ({ user: m.user, text: m.text, ts: m.ts }));
+  return { messages, partial: true, calledApi: !g.isDm };
 }
 
 function threadTsFromPermalink(permalink?: string): string | undefined {
@@ -419,7 +487,8 @@ async function classify(
     .map((g, i) => {
       const where = g.isDm ? "DM" : `#${g.channelName}`;
       const date = formatJst(g.requestTs);
-      return `--- スレッド${i + 1}（${where}・最新の依頼 ${date}）---\n${renderMessages(g.messages, names)}`;
+      const note = g.partial ? `${PARTIAL_NOTE}\n` : "";
+      return `--- スレッド${i + 1}（${where}・最新の依頼 ${date}）---\n${note}${renderMessages(g.messages, names)}`;
     })
     .join("\n\n");
 
@@ -502,7 +571,7 @@ async function upsertItem(
   names: Map<string, string>,
 ): Promise<void> {
   const db = getDb();
-  const context = renderMessages(g.messages, names);
+  const context = `${g.partial ? `${PARTIAL_NOTE}\n` : ""}${renderMessages(g.messages, names)}`;
   await db`
     INSERT INTO work_items (
       id, channel_id, channel_name, is_dm, thread_ts, request_ts, permalink,

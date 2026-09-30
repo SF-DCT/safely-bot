@@ -173,11 +173,16 @@ function releaseLock() {
 }
 
 function loadSecrets() {
+  // Windows の railway は npm のシム（railway.cmd）なので cmd 経由で呼ぶ
+  const [cmd, args] =
+    process.platform === "win32"
+      ? [process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "railway", "variables", "--service", "safely-bot", "--json"]]
+      : ["railway", ["variables", "--service", "safely-bot", "--json"]];
   return new Promise((resolve, reject) => {
     execFile(
-      "railway",
-      ["variables", "--service", "safely-bot", "--json"],
-      { cwd: MAMO_DIR, shell: process.platform === "win32", windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      cmd,
+      args,
+      { cwd: MAMO_DIR, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout) => {
         if (err) return reject(new Error(`railway variables に失敗: ${err.message}`));
         try {
