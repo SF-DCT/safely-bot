@@ -15,7 +15,24 @@ import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
 import { scheduleMgrIdeaExtract } from "./scheduler/mgr-idea-extract.js";
 import { scheduleMirrorBounceCheck } from "./scheduler/mirror-bounce-check.js";
 import { scheduleReviewWatch } from "./scheduler/review-watch.js";
+import {
+  scheduleWorkInbox,
+  runManualWorkScan,
+} from "./scheduler/work-inbox.js";
 import { initDatabase } from "./data-sources/database.js";
+import type { BlockAction, types as SlackTypes } from "@slack/bolt";
+import {
+  getItem,
+  settleCard,
+  queueAnalysis,
+  setStatus,
+  snooze,
+  createDraft,
+  saveDraft,
+  draftCardBlocks,
+  sendDraft,
+  discardDraftStatus,
+} from "./data-sources/work-inbox.js";
 // 2026-05-09: シナリオエンジンは Orbit (cgs-crm) に移管 (Phase B/C)。
 // mamo側の seed/engine 起動は廃止。tools経由でOrbit HTTP APIを叩く。
 import {
@@ -102,6 +119,11 @@ app.message(async ({ message, say }) => {
     if (result.specialAction === "daily_report") {
       await say(toSlackMrkdwn(result.text));
       await sendDailyReportDraft(app.client, SLACK_USER_ID);
+      return;
+    }
+    if (result.specialAction === "work_scan") {
+      await say(toSlackMrkdwn(result.text));
+      await say(await runManualWorkScan());
       return;
     }
 
@@ -351,6 +373,261 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   }
 });
 
+// --- 業務の受付箱（Work Inbox）ボタンハンドラー ---
+// カードは高橋さんのDMにだけ届く。送信系は ✅ を押したときだけ実行する。
+
+type KnownBlock = SlackTypes.KnownBlock;
+
+function cardOf(body: unknown): { channel: string; ts: string; blocks: KnownBlock[] } {
+  const b = body as BlockAction;
+  return {
+    channel: b.channel?.id || b.container?.channel_id || "",
+    ts: b.message?.ts || b.container?.message_ts || "",
+    blocks: ((b.message?.blocks as KnownBlock[] | undefined) || []),
+  };
+}
+
+function valueOf(action: unknown): string {
+  return (action as { value?: string }).value || "";
+}
+
+async function notifyWorkError(channel: string, e: unknown): Promise<void> {
+  console.error("[WorkInbox] action error:", e);
+  try {
+    await app.client.chat.postMessage({
+      channel,
+      text: `:x: 処理中にエラーが発生しました: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+app.action("work_analyze", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await queueAnalysis(valueOf(action));
+    await settleCard(
+      app.client,
+      card.channel,
+      card.ts,
+      card.blocks,
+      "⏳ 作業待ちに入れました。PCの Claude Code が順番に分析し、結果をここに送ります（PCが起動中のとき・22時〜7時は翌朝）。",
+    );
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_retry", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await queueAnalysis(valueOf(action));
+    await settleCard(app.client, card.channel, card.ts, card.blocks, "⏳ もう一度、作業待ちに入れました。");
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_snooze", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await snooze(valueOf(action));
+    await settleCard(app.client, card.channel, card.ts, card.blocks, "🕒 明日の朝にもう一度お知らせします。");
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_close", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await setStatus(valueOf(action), "closed");
+    await settleCard(app.client, card.channel, card.ts, card.blocks, "✅ 対応済みにしました。");
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_ignore", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await setStatus(valueOf(action), "ignored");
+    await settleCard(app.client, card.channel, card.ts, card.blocks, "❌ 対象外にしました（今後は拾いません）。");
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_draft", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    const item = await getItem(valueOf(action));
+    if (!item) throw new Error("依頼が見つかりませんでした");
+    const placeholder = await app.client.chat.postMessage({
+      channel: card.channel,
+      text: "📝 返信の下書きを作っています…",
+    });
+    const draft = await createDraft(item);
+    await app.client.chat.update({
+      channel: card.channel,
+      ts: placeholder.ts || "",
+      text: "📝 返信の下書き",
+      blocks: draftCardBlocks(item, draft),
+    });
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+async function handleSend(body: unknown, action: unknown, mode: "now" | "schedule"): Promise<void> {
+  const card = cardOf(body);
+  try {
+    const item = await getItem(valueOf(action));
+    if (!item) throw new Error("依頼が見つかりませんでした");
+    const { note } = await sendDraft(item, mode);
+    await settleCard(app.client, card.channel, card.ts, card.blocks, note);
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+}
+
+app.action("work_send", async ({ ack, body, action }) => {
+  await ack();
+  await handleSend(body, action, "now");
+});
+
+app.action("work_send_schedule", async ({ ack, body, action }) => {
+  await ack();
+  await handleSend(body, action, "schedule");
+});
+
+app.action("work_discard", async ({ ack, body, action }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    const item = await getItem(valueOf(action));
+    if (item) await setStatus(item.id, discardDraftStatus(item));
+    await settleCard(app.client, card.channel, card.ts, card.blocks, "🗑 この下書きは送らないことにしました。");
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.action("work_edit", async ({ ack, body, action, client }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    const item = await getItem(valueOf(action));
+    if (!item) throw new Error("依頼が見つかりませんでした");
+    await client.views.open({
+      trigger_id: (body as { trigger_id?: string }).trigger_id || "",
+      view: {
+        type: "modal",
+        callback_id: "work_edit_submit",
+        private_metadata: JSON.stringify({ id: item.id, channel: card.channel, ts: card.ts }),
+        title: { type: "plain_text", text: "下書きを直す" },
+        submit: { type: "plain_text", text: "保存（まだ送らない）" },
+        close: { type: "plain_text", text: "キャンセル" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "draft_block",
+            label: { type: "plain_text", text: "返信の本文" },
+            element: {
+              type: "plain_text_input",
+              action_id: "draft_input",
+              multiline: true,
+              initial_value: (item.draft_text || "").slice(0, 3000),
+            },
+          },
+        ],
+      },
+    });
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.view("work_edit_submit", async ({ ack, view }) => {
+  await ack();
+  const meta = JSON.parse(view.private_metadata || "{}") as { id?: string; channel?: string; ts?: string };
+  const text = view.state.values.draft_block?.draft_input?.value?.trim() || "";
+  if (!meta.id || !meta.channel || !meta.ts || !text) return;
+  try {
+    await saveDraft(meta.id, text);
+    const item = await getItem(meta.id);
+    if (!item) return;
+    await app.client.chat.update({
+      channel: meta.channel,
+      ts: meta.ts,
+      text: "📝 返信の下書き（修正済み）",
+      blocks: draftCardBlocks(item, text),
+    });
+  } catch (e) {
+    await notifyWorkError(meta.channel, e);
+  }
+});
+
+app.action("work_reinstruct", async ({ ack, body, action, client }) => {
+  await ack();
+  const card = cardOf(body);
+  try {
+    await client.views.open({
+      trigger_id: (body as { trigger_id?: string }).trigger_id || "",
+      view: {
+        type: "modal",
+        callback_id: "work_reinstruct_submit",
+        private_metadata: JSON.stringify({ id: valueOf(action), channel: card.channel, ts: card.ts }),
+        title: { type: "plain_text", text: "指示を足してやり直す" },
+        submit: { type: "plain_text", text: "作業待ちに入れる" },
+        close: { type: "plain_text", text: "キャンセル" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "instruction_block",
+            label: { type: "plain_text", text: "追加の指示" },
+            element: {
+              type: "plain_text_input",
+              action_id: "instruction_input",
+              multiline: true,
+              placeholder: {
+                type: "plain_text",
+                text: "例: 8月と9月の比較にして、TCとSFを分けて見て",
+              },
+            },
+          },
+        ],
+      },
+    });
+  } catch (e) {
+    await notifyWorkError(card.channel, e);
+  }
+});
+
+app.view("work_reinstruct_submit", async ({ ack, view }) => {
+  await ack();
+  const meta = JSON.parse(view.private_metadata || "{}") as { id?: string; channel?: string; ts?: string };
+  const instruction = view.state.values.instruction_block?.instruction_input?.value?.trim() || "";
+  if (!meta.id || !meta.channel || !instruction) return;
+  try {
+    await queueAnalysis(meta.id, instruction);
+    await app.client.chat.postMessage({
+      channel: meta.channel,
+      ...(meta.ts ? { thread_ts: meta.ts } : {}),
+      text: `⏳ 追加の指示で作業待ちに入れました。\n> ${instruction.replace(/\n/g, "\n> ")}`,
+    });
+  } catch (e) {
+    await notifyWorkError(meta.channel, e);
+  }
+});
+
 // Start the app
 (async () => {
   // Bot自身のUser IDを取得
@@ -377,6 +654,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   scheduleMgrIdeaExtract();
   scheduleMirrorBounceCheck();
   scheduleReviewWatch();
+  if (env.DATABASE_URL) scheduleWorkInbox(); // 業務の受付箱（work_items テーブル必須）
   // schedulePendingThreadsCheck(); // 一時停止 2026-04-17 精度改善のため回収
 
   await app.start();
@@ -393,6 +671,7 @@ app.view("orbit_fix_ask_submit", async ({ ack, view }) => {
   console.log("📥 MGR weekly idea extract: Fridays 14:00 JST");
   console.log("🚨 Mirror bounce check: every 30 min (24/7)");
   console.log("💬 TC review watch: every 15 min (24/7)");
+  console.log("📥 Work inbox: weekdays 9:30 / 14:00 JST (worker = 高橋さんのPC)");
   console.log(`🛰️ Orbit改修依頼フロー (Phase 1): @mamo mention in ${CGS_CHANNEL_ID}`);
   console.log(`🔄 Scenario engine: Orbit (${env.ORBIT_API_BASE}) — operated via tools`);
 })();

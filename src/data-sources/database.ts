@@ -81,6 +81,54 @@ export async function initDatabase(): Promise<void> {
     )
   `;
 
+  // 業務の受付箱（Work Inbox）: 拾った依頼と、分析・下書き・送信の状態
+  // queued の行は高橋さんのPCの worker（worker/work-runner.mjs）が処理する
+  await db`
+    CREATE TABLE IF NOT EXISTS work_items (
+      id             TEXT PRIMARY KEY,
+      channel_id     TEXT NOT NULL,
+      channel_name   TEXT,
+      is_dm          BOOLEAN DEFAULT false,
+      thread_ts      TEXT NOT NULL,
+      request_ts     TEXT NOT NULL,
+      permalink      TEXT,
+      requester_id   TEXT,
+      summary        TEXT NOT NULL,
+      kind           TEXT NOT NULL,
+      can_mamo_do    BOOLEAN DEFAULT false,
+      proposed_work  TEXT,
+      priority       TEXT DEFAULT 'medium',
+      stall_reason   TEXT,
+      context_text   TEXT,
+      status         TEXT NOT NULL,
+      snooze_until   TIMESTAMPTZ,
+      instruction    TEXT,
+      card_channel   TEXT,
+      card_ts        TEXT,
+      result_json    JSONB,
+      result_ts      TEXT,
+      report_path    TEXT,
+      session_id     TEXT,
+      draft_text     TEXT,
+      sent_ts        TEXT,
+      last_error     TEXT,
+      proposed_at    TIMESTAMPTZ,
+      started_at     TIMESTAMPTZ,
+      finished_at    TIMESTAMPTZ,
+      created_at     TIMESTAMPTZ DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  // mamo の小さな状態（最終スキャン時刻など）
+  await db`
+    CREATE TABLE IF NOT EXISTS mamo_kv (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
   // Indexes — try/catch で「already exists」を無視
   try {
     await db`CREATE INDEX idx_enrollments_next ON enrollments(status, next_execute_at) WHERE status = 'active'`;
@@ -104,6 +152,11 @@ export async function initDatabase(): Promise<void> {
   }
   try {
     await db`CREATE INDEX idx_orbit_state ON orbit_requests(state)`;
+  } catch (e: unknown) {
+    if (!(e instanceof Error && e.message.includes("already exists"))) throw e;
+  }
+  try {
+    await db`CREATE INDEX idx_work_items_status ON work_items(status, updated_at)`;
   } catch (e: unknown) {
     if (!(e instanceof Error && e.message.includes("already exists"))) throw e;
   }

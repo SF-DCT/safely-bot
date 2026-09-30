@@ -36,7 +36,7 @@ ${EMAIL_CONTEXT}
 
 export interface IntentResult {
   text: string;
-  specialAction?: "briefing" | "test_briefing" | "daily_report";
+  specialAction?: "briefing" | "test_briefing" | "daily_report" | "work_scan";
 }
 
 export async function routeIntent(userMessage: string): Promise<IntentResult> {
@@ -77,6 +77,12 @@ export async function routeIntent(userMessage: string): Promise<IntentResult> {
         return {
           text: "日報ドラフトを作成中です...",
           specialAction: "daily_report",
+        };
+      }
+      if (result === "WORK_SCAN_REQUESTED") {
+        return {
+          text: "高橋さん宛ての依頼を拾っています。数分かかります（終わったらカードでお送りします）。",
+          specialAction: "work_scan",
         };
       }
 

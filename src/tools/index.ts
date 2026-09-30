@@ -240,6 +240,16 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: "scan_work_requests",
+    description:
+      "Slackで高橋さん宛てに来た依頼（メンション・DM）を拾い、まだ終わっていないものを仕分けて、代わりに分析・整理できるものをDMにカードで提案する。「依頼を拾って」「依頼チェック」「溜まってる依頼ある？」「代わりにできることある？」などのリクエストで使う。",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "search_wp_member",
     description:
       "TC（水道修理のセーフリー）のメンバー（業者）をWordPressから検索する。業者名や会社名で検索し、口コミ数・評価・電話番号などの基本情報を返す。「○○水道の情報教えて」「○○の口コミ数は？」などのリクエストで使う。",
@@ -394,6 +404,10 @@ export async function executeTool(
 
     case "check_pending_threads": {
       return await checkPendingThreads();
+    }
+
+    case "scan_work_requests": {
+      return "WORK_SCAN_REQUESTED";
     }
 
     // WordPress（TC）メンバー情報
