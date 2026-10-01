@@ -1,8 +1,34 @@
 import cron from "node-cron";
 import { app } from "../app.js";
 import { SLACK_USER_ID } from "../config/env.js";
-import { runWorkScan } from "../data-sources/work-inbox.js";
+import { runWorkScan, getKv, setKv } from "../data-sources/work-inbox.js";
 import { isBusinessDay } from "../utils/jp-holidays.js";
+import { toFriendlyClaudeError } from "../utils/claude-errors.js";
+
+const RETRY_NOTE =
+  "今回の分は取りこぼしません（次の回か、DMで「依頼を拾って」と送ったときにまとめて拾い直します）。";
+
+/** 失敗をDMに伝える文面。残高不足など既知のものは日本語で、それ以外は1行に要約 */
+function failureText(e: unknown): string {
+  const friendly = toFriendlyClaudeError(e);
+  if (friendly) return `:warning: ${friendly.message}\n${RETRY_NOTE}`;
+  const msg = e instanceof Error ? e.message : String(e);
+  return `:x: 依頼の拾い上げでエラーが発生しました: ${msg.split("\n")[0].slice(0, 200)}\n${RETRY_NOTE}`;
+}
+
+/** 同じ種類の失敗は1日1回だけ知らせる（残高不足で毎回DMが届かないように） */
+async function shouldNotify(e: unknown): Promise<boolean> {
+  const kind = toFriendlyClaudeError(e)?.kind || "other";
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+  const key = `work_inbox_alert_${kind}`;
+  try {
+    if ((await getKv(key)) === today) return false;
+    await setKv(key, today);
+  } catch {
+    // DB に書けなくても通知は送る
+  }
+  return true;
+}
 
 let running = false;
 
@@ -41,12 +67,13 @@ export async function runScheduled(label: string): Promise<void> {
   } catch (e) {
     console.error("[Scheduler] Work inbox failed:", e);
     try {
+      if (!(await shouldNotify(e))) {
+        console.log("[Scheduler] Work inbox failure already notified today, skip DM.");
+        return;
+      }
       const dm = await app.client.conversations.open({ users: SLACK_USER_ID });
       if (dm.channel?.id) {
-        await app.client.chat.postMessage({
-          channel: dm.channel.id,
-          text: `:x: 依頼の拾い上げでエラーが発生しました: ${e instanceof Error ? e.message : String(e)}`,
-        });
+        await app.client.chat.postMessage({ channel: dm.channel.id, text: failureText(e) });
       }
     } catch {
       // DM送信自体が失敗した場合はログのみ
@@ -62,6 +89,9 @@ export async function runManualWorkScan(): Promise<string> {
   running = true;
   try {
     return await runWorkScan(app.client, { manual: true });
+  } catch (e) {
+    console.error("[WorkInbox] manual scan failed:", e);
+    return failureText(e);
   } finally {
     running = false;
   }

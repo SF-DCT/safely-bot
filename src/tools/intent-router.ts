@@ -1,6 +1,7 @@
 import { getClaudeClient } from "../utils/claude-client.js";
 import { tools, executeTool } from "./index.js";
 import { EMAIL_CONTEXT } from "../config/email-context.js";
+import { toFriendlyClaudeError } from "../utils/claude-errors.js";
 
 const SYSTEM_PROMPT = `あなたはSAFELY Botです。株式会社SAFELYの業務をサポートするAI秘書として振る舞います。
 
@@ -40,6 +41,17 @@ export interface IntentResult {
 }
 
 export async function routeIntent(userMessage: string): Promise<IntentResult> {
+  try {
+    return await routeIntentInner(userMessage);
+  } catch (e) {
+    // 残高不足などは理由をそのまま返す（「エラーが発生しました」だけだと原因が分からないため）
+    const friendly = toFriendlyClaudeError(e);
+    if (friendly) return { text: `:warning: ${friendly.message}` };
+    throw e;
+  }
+}
+
+async function routeIntentInner(userMessage: string): Promise<IntentResult> {
   const client = getClaudeClient();
 
   const messages: { role: "user" | "assistant"; content: string }[] = [

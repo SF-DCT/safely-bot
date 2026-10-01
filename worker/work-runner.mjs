@@ -412,47 +412,117 @@ async function processJob(sql, slack, item) {
   const started = Date.now();
   log(`start ${item.id}: ${item.summary}`);
 
+  let result;
+  let costUsd;
   try {
     const out = await runClaude(buildPrompt(item, reportRel));
     if (out.is_error || out.subtype !== "success") {
       throw new Error(`Claude Code がエラーで終了しました（${out.subtype || "unknown"}）: ${String(out.result || "").slice(0, 300)}`);
     }
-    const result = parseResult(out.result, item);
-    const minutes = Math.max(1, Math.round((Date.now() - started) / 60000));
-    const reportExists = fs.existsSync(path.join(WORKSPACE, reportRel));
+    result = parseResult(out.result, item);
+    costUsd = out.total_cost_usd;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    log(`failed ${item.id}: ${message}`);
+    await withRetry(
+      () => sql`
+        UPDATE work_items SET status = 'failed', last_error = ${message}, finished_at = NOW(), updated_at = NOW()
+        WHERE id = ${item.id}
+      `,
+      "save failure",
+    );
+    try {
+      const channel = await withRetry(() => openDm(slack), "open DM");
+      await withRetry(
+        () => slack.chat.postMessage({ channel, text: "⚠️ 分析を完了できませんでした", blocks: failureBlocks(item, message) }),
+        "post failure",
+      );
+    } catch (e2) {
+      log(`failure notice error: ${e2 instanceof Error ? e2.message : String(e2)}`);
+    }
+    return;
+  }
 
-    const channel = await openDm(slack);
-    const posted = await slack.chat.postMessage({
-      channel,
-      text: `📊 分析できました：${result.title}`,
-      blocks: resultBlocks(item, result, reportExists ? reportRel : "（報告ファイルなし）", minutes),
-    });
-    await sql`
+  // 結果の通知と保存は、通信エラーなら時間をおいてやり直す（分析結果を捨てない）。
+  // それでも失敗したら running のまま残り、上限時間を過ぎると作業待ちに戻る
+  const minutes = Math.max(1, Math.round((Date.now() - started) / 60000));
+  const reportExists = fs.existsSync(path.join(WORKSPACE, reportRel));
+  const channel = await withRetry(() => openDm(slack), "open DM");
+  const posted = await withRetry(
+    () =>
+      slack.chat.postMessage({
+        channel,
+        text: `📊 分析できました：${result.title}`,
+        blocks: resultBlocks(item, result, reportExists ? reportRel : "（報告ファイルなし）", minutes),
+      }),
+    "post result",
+  );
+  await withRetry(
+    () => sql`
       UPDATE work_items
       SET status = 'done', result_json = ${JSON.stringify(result)}::jsonb,
           report_path = ${reportExists ? reportRel : null}, result_ts = ${posted.ts || null},
           finished_at = NOW(), last_error = NULL, updated_at = NOW()
       WHERE id = ${item.id}
-    `;
-    log(`done ${item.id} (${minutes}min, cost=${out.total_cost_usd ?? "?"})`);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    log(`failed ${item.id}: ${message}`);
-    await sql`
-      UPDATE work_items SET status = 'failed', last_error = ${message}, finished_at = NOW(), updated_at = NOW()
-      WHERE id = ${item.id}
-    `;
+    `,
+    "save result",
+  );
+  log(`done ${item.id} (${minutes}min, cost=${costUsd ?? "?"})`);
+}
+
+/** スリープ復帰直後・回線の瞬断など、待てば直るエラーか */
+function isNetworkError(e) {
+  const text = `${e?.message || ""} ${e?.cause?.message || ""} ${e?.cause?.code || ""}`;
+  return /fetch failed|ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|getaddrinfo|socket hang up|dns error|error sending request|不明です/i.test(
+    text,
+  );
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 起動時に接続情報を取れるまで待つ（ログオン直後はネットワークがまだないことがある） */
+async function loadSecretsWithRetry() {
+  let announced = false;
+  for (;;) {
     try {
-      const channel = await openDm(slack);
-      await slack.chat.postMessage({
-        channel,
-        text: "⚠️ 分析を完了できませんでした",
-        blocks: failureBlocks(item, message),
-      });
-    } catch (e2) {
-      log(`failure notice error: ${e2 instanceof Error ? e2.message : String(e2)}`);
+      const secrets = await loadSecrets();
+      if (announced) log("ネットワークにつながったため、接続情報を読み込みました");
+      return secrets;
+    } catch (e) {
+      if (!announced) {
+        log(`接続情報を読めないため、1分ごとに再試行します: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        announced = true;
+      }
+      await sleep(POLL_MS);
     }
   }
+}
+
+/** 一時的な通信エラーなら、時間をおいて数回やり直す（結果の書き戻しを落とさないため） */
+async function withRetry(fn, label) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= 5 || !isNetworkError(e)) throw e;
+      log(`${label}: 通信エラーのため30秒後に再試行します（${i}/5）`);
+      await sleep(30_000);
+    }
+  }
+}
+
+/**
+ * 途中で止まった作業を作業待ちに戻す。worker は1台・1件ずつなので、
+ * 起動時の running はすべて中断扱い、稼働中は上限時間を超えたものだけを戻す。
+ */
+async function requeueStale(sql, minutes) {
+  const rows = await sql`
+    UPDATE work_items
+    SET status = 'queued', last_error = 'worker が中断したため、作業待ちに戻しました', updated_at = NOW()
+    WHERE status = 'running' AND started_at < NOW() - make_interval(mins => ${minutes}::int)
+    RETURNING id
+  `;
+  for (const r of rows) log(`requeued stale job ${r.id}`);
 }
 
 async function main() {
@@ -464,15 +534,26 @@ async function main() {
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
 
-  let secrets = await loadSecrets();
+  let secrets = await loadSecretsWithRetry();
   let sql = neon(secrets.databaseUrl);
   let slack = new WebClient(secrets.botToken);
   log(`worker started (pid=${process.pid}, workspace=${WORKSPACE})`);
+  await withRetry(() => requeueStale(sql, 0), "requeue on start").catch((e) =>
+    log(`requeue on start error: ${e instanceof Error ? e.message : String(e)}`),
+  );
 
+  let offlineSince = null;
+  let otherFailures = 0;
   for (;;) {
     try {
       if (!isQuietHours()) {
+        await requeueStale(sql, Math.ceil(JOB_TIMEOUT_MS / 60000) + 10);
         const item = await claimJob(sql);
+        if (offlineSince) {
+          log(`ネットワーク復旧（${Math.round((Date.now() - offlineSince) / 60000)}分間つながりませんでした）`);
+          offlineSince = null;
+        }
+        otherFailures = 0;
         if (item) {
           await processJob(sql, slack, item);
           if (ONCE) break;
@@ -484,16 +565,30 @@ async function main() {
         break;
       }
     } catch (e) {
-      log(`loop error: ${e instanceof Error ? e.message : String(e)}`);
-      try {
-        secrets = await loadSecrets(); // 接続情報が変わった可能性に備えて読み直す
-        sql = neon(secrets.databaseUrl);
-        slack = new WebClient(secrets.botToken);
-      } catch (e2) {
-        log(`secrets reload error: ${e2 instanceof Error ? e2.message : String(e2)}`);
+      if (isNetworkError(e)) {
+        // スリープ復帰直後など。接続情報は変わっていないので読み直さず、つながるまで待つ
+        if (!offlineSince) {
+          offlineSince = Date.now();
+          log("ネットワークにつながらないため待機します（スリープ復帰直後など）");
+        }
+      } else {
+        otherFailures++;
+        log(`loop error: ${e instanceof Error ? e.message : String(e)}`);
+        if (otherFailures >= 3) {
+          // 通信以外の失敗が続く＝接続情報が変わった可能性。読み直す
+          try {
+            secrets = await loadSecrets();
+            sql = neon(secrets.databaseUrl);
+            slack = new WebClient(secrets.botToken);
+            otherFailures = 0;
+            log("接続情報を読み直しました");
+          } catch (e2) {
+            log(`secrets reload error: ${e2 instanceof Error ? e2.message.split("\n")[0] : String(e2)}`);
+          }
+        }
       }
     }
-    await new Promise((r) => setTimeout(r, POLL_MS));
+    await sleep(POLL_MS);
   }
 }
 

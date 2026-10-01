@@ -3,6 +3,7 @@ import type { types as SlackTypes } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import { env, SLACK_USER_ID, SLACK_CEO_USER_ID } from "../config/env.js";
 import { getClaudeClient } from "../utils/claude-client.js";
+import { toFriendlyClaudeError } from "../utils/claude-errors.js";
 import { getDb } from "./database.js";
 
 // ============================================================
@@ -528,9 +529,7 @@ async function callClaudeJson(
     fallbacks: "default",
   } as unknown as Anthropic.MessageCreateParamsNonStreaming;
 
-  const response = await claude.messages.create(params, {
-    headers: { "anthropic-beta": "server-side-fallback-2026-07-01" },
-  });
+  const response = await createMessage(claude, params);
   if ((response.stop_reason as string) === "refusal") {
     throw new Error("Claude が応答を辞退しました（refusal）");
   }
@@ -538,6 +537,20 @@ async function callClaudeJson(
     .filter((b) => b.type === "text")
     .map((b) => ("text" in b ? b.text : ""))
     .join("");
+}
+
+/** 残高不足などの既知のエラーは、DM にそのまま出せる日本語のエラーにして投げ直す */
+async function createMessage(
+  claude: Anthropic,
+  params: Anthropic.MessageCreateParamsNonStreaming,
+): Promise<Anthropic.Message> {
+  try {
+    return await claude.messages.create(params, {
+      headers: { "anthropic-beta": "server-side-fallback-2026-07-01" },
+    });
+  } catch (e) {
+    throw toFriendlyClaudeError(e) || e;
+  }
 }
 
 async function callClaudeText(system: string, user: string): Promise<string> {
@@ -551,9 +564,7 @@ async function callClaudeText(system: string, user: string): Promise<string> {
     fallbacks: "default",
   } as unknown as Anthropic.MessageCreateParamsNonStreaming;
 
-  const response = await claude.messages.create(params, {
-    headers: { "anthropic-beta": "server-side-fallback-2026-07-01" },
-  });
+  const response = await createMessage(claude, params);
   if ((response.stop_reason as string) === "refusal") {
     throw new Error("Claude が応答を辞退しました（refusal）");
   }
@@ -972,7 +983,7 @@ function ageLabel(ts: string): string {
   return `${Math.round(hours / 24)}日前`;
 }
 
-async function getKv(key: string): Promise<string | null> {
+export async function getKv(key: string): Promise<string | null> {
   const db = getDb();
   const rows = (await db`SELECT value FROM mamo_kv WHERE key = ${key}`) as {
     value: string;
@@ -980,7 +991,7 @@ async function getKv(key: string): Promise<string | null> {
   return rows[0]?.value || null;
 }
 
-async function setKv(key: string, value: string): Promise<void> {
+export async function setKv(key: string, value: string): Promise<void> {
   const db = getDb();
   await db`
     INSERT INTO mamo_kv (key, value) VALUES (${key}, ${value})
