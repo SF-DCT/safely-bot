@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-export type ClaudeErrorKind = "credit" | "auth" | "rate" | "server";
+// moved = Railway 上から呼ばれた（Claude の処理は PC の worker で動かす方針）
+export type ClaudeErrorKind = "credit" | "auth" | "rate" | "server" | "moved";
 
 /**
  * Slack にそのまま出せる日本語の説明を持つ Claude API エラー。

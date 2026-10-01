@@ -903,6 +903,35 @@ export async function sendDraft(
 }
 
 // ------------------------------------------------------------
+// 失敗の知らせ方（PC の worker が使う）
+// ------------------------------------------------------------
+
+const RETRY_NOTE =
+  "今回の分は取りこぼしません（次の回か、DMで「依頼を拾って」と送ったときにまとめて拾い直します）。";
+
+/** 拾い上げの失敗をDMに伝える文面。既知のものは日本語で、それ以外は1行に要約 */
+export function scanFailureText(e: unknown): string {
+  const friendly = toFriendlyClaudeError(e);
+  if (friendly) return `:warning: ${friendly.message}\n${RETRY_NOTE}`;
+  const msg = e instanceof Error ? e.message : String(e);
+  return `:x: 依頼の拾い上げでエラーが発生しました: ${msg.split("\n")[0].slice(0, 200)}\n${RETRY_NOTE}`;
+}
+
+/** 同じ種類の失敗は1日1回だけ知らせる */
+export async function shouldNotifyScanFailure(e: unknown): Promise<boolean> {
+  const kind = toFriendlyClaudeError(e)?.kind || "other";
+  const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+  const key = `work_inbox_alert_${kind}`;
+  try {
+    if ((await getKv(key)) === today) return false;
+    await setKv(key, today);
+  } catch {
+    // DB に書けなくても通知は送る
+  }
+  return true;
+}
+
+// ------------------------------------------------------------
 // 共通
 // ------------------------------------------------------------
 

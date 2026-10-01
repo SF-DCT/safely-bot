@@ -1,5 +1,6 @@
 import { Client } from "@notionhq/client";
-import { env } from "../config/env.js";
+import type { WebClient } from "@slack/web-api";
+import { env, SLACK_USER_ID } from "../config/env.js";
 import { getClaudeClient } from "../utils/claude-client.js";
 import { readRange } from "./google-sheets.js";
 
@@ -721,4 +722,36 @@ export function formatExtractDetailForSlack(result: ExtractResult): string {
 /** 旧API互換: サマリのみを返す */
 export function formatExtractResultForSlack(result: ExtractResult): string {
   return formatExtractSummaryForSlack(result);
+}
+
+/**
+ * 抽出して Notion に書き込み、高橋さんの DM にサマリ（詳細はスレッド）を送る。
+ * 2026-10-01 から PC の worker で実行（金曜 14:00 に mamo がキューに積む）。
+ */
+export async function runMgrIdeaExtractAndNotify(client: WebClient): Promise<void> {
+  const dm = await client.conversations.open({ users: SLACK_USER_ID });
+  const channel = dm.channel?.id;
+  try {
+    const result = await extractWeeklyMgrIdeas();
+    const summary = formatExtractSummaryForSlack(result);
+    const detail = formatExtractDetailForSlack(result);
+    if (channel) {
+      const parent = await client.chat.postMessage({ channel, text: summary });
+      // 詳細をスレッドに（Slackの4000字制限回避＋見やすさ）
+      if (detail.trim().length > 0 && parent.ts) {
+        await client.chat.postMessage({ channel, text: detail, thread_ts: parent.ts });
+      }
+    }
+    console.log(
+      `[MGR Idea Extract] posted. (notionStatus=${result.notionWriteStatus}, sfIdeas=${result.sfIdeas.length})`,
+    );
+  } catch (e) {
+    console.error("[MGR Idea Extract] failed:", e);
+    if (channel) {
+      await client.chat.postMessage({
+        channel,
+        text: `⚠️ MGR金曜アイディア抽出でエラー: \n${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
 }

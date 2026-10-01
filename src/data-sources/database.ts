@@ -120,6 +120,20 @@ export async function initDatabase(): Promise<void> {
     )
   `;
 
+  // PC の worker に渡す作業（Claude を使う処理）のキュー（src/data-sources/llm-jobs.ts）
+  await db`
+    CREATE TABLE IF NOT EXISTS llm_jobs (
+      id           TEXT PRIMARY KEY,
+      kind         TEXT NOT NULL,
+      payload      JSONB DEFAULT '{}',
+      status       TEXT NOT NULL,
+      error        TEXT,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      started_at   TIMESTAMPTZ,
+      finished_at  TIMESTAMPTZ
+    )
+  `;
+
   // mamo の小さな状態（最終スキャン時刻など）
   await db`
     CREATE TABLE IF NOT EXISTS mamo_kv (

@@ -15,10 +15,7 @@ import { schedulePendingThreadsCheck } from "./scheduler/pending-threads.js";
 import { scheduleMgrIdeaExtract } from "./scheduler/mgr-idea-extract.js";
 import { scheduleMirrorBounceCheck } from "./scheduler/mirror-bounce-check.js";
 import { scheduleReviewWatch } from "./scheduler/review-watch.js";
-import {
-  scheduleWorkInbox,
-  runManualWorkScan,
-} from "./scheduler/work-inbox.js";
+import { scheduleWorkInbox } from "./scheduler/work-inbox.js";
 import { initDatabase } from "./data-sources/database.js";
 import type { BlockAction, types as SlackTypes } from "@slack/bolt";
 import {
@@ -27,34 +24,22 @@ import {
   queueAnalysis,
   setStatus,
   snooze,
-  createDraft,
   saveDraft,
   draftCardBlocks,
   sendDraft,
   discardDraftStatus,
 } from "./data-sources/work-inbox.js";
+import { enqueueJob, signalWorker, ensureBoard } from "./data-sources/llm-jobs.js";
 // 2026-05-09: シナリオエンジンは Orbit (cgs-crm) に移管 (Phase B/C)。
 // mamo側の seed/engine 起動は廃止。tools経由でOrbit HTTP APIを叩く。
 import {
-  sendBriefing,
-  sendTestBriefing,
-} from "./slack-handlers/briefing-sender.js";
-import {
-  sendDailyReportDraft,
   postApprovedReport,
   getPendingDraft,
   clearPendingDraft,
   setEditMode,
   handleEditFeedback,
 } from "./report/report-sender.js";
-import { routeIntent } from "./tools/intent-router.js";
-import { toSlackMrkdwn } from "./utils/slack-format.js";
 import {
-  isWatchedChannel,
-  observeAndMaybeRespond,
-} from "./tools/proactive-observer.js";
-import {
-  handleOrbitFixIntake,
   approveRequest,
   rejectRequest,
   askRequester,
@@ -62,32 +47,66 @@ import {
 
 let botUserId = "";
 
-// DM message handler — Claude tool useで自然な会話
+// ============================================================
+// 2026-10-01: API課金を避けるため、mamo（Railway）は Claude を呼ばない。
+// Claude を使う処理（会話・依頼の仕分け・下書き・Orbit分類・MGR抽出）は
+// llm_jobs に積み、高橋さんのPCの worker（サブスクの Claude Code）が実行する。
+// PCの Claude Code はワークスペース全体を読めるため、会話は高橋さん本人からだけ受け付ける。
+// 会話オブザーバーは同日に停止。
+// ============================================================
+
+const SCAN_COMMAND = /依頼.*(拾|ひろ|チェック|確認|ある)|溜まってる依頼|代わりにできること/;
+
+function isNightJst(): boolean {
+  const h = Number(
+    new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo", hour: "numeric", hour12: false }),
+  ) % 24;
+  return h >= 22 || h < 7;
+}
+
+/** PCの worker が動かない時間帯の注記（22時〜翌7時は作業しない） */
+function pcNote(): string {
+  return isNightJst() ? "\n（22時〜7時はPCで作業しないため、7時以降に対応します）" : "";
+}
+
+const NOT_ACCEPTING =
+  "mamo への質問は、現在は高橋さん本人からのみ受け付けています（回答に高橋さんのPCの Claude Code を使っているため）。";
+
+/** 会話を PC の worker に頼む。考え中の表示を先に出し、worker がそれを回答に書き換える */
+async function requestChat(channel: string, text: string, requestTs: string, threadTs?: string) {
+  const placeholder = await app.client.chat.postMessage({
+    channel,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+    text: `💭 PCの Claude Code が考えています…（1〜3分）${pcNote()}`,
+  });
+  await enqueueJob(app.client, "chat", {
+    channel,
+    text,
+    request_ts: requestTs,
+    thread_ts: threadTs || null,
+    placeholder_ts: placeholder.ts || null,
+  });
+}
+
+// DM message handler — 会話は PC の worker に回す
 app.message(async ({ message, say }) => {
   if (message.subtype) return;
   if (!("text" in message) || !message.text) return;
   if (!("user" in message)) return;
   if (message.user === botUserId) return;
 
-  // 監視対象チャンネルのメッセージ → オブザーバーに渡す
-  if ("channel" in message && isWatchedChannel(message.channel)) {
-    await observeAndMaybeRespond(
-      app.client,
-      message.channel,
-      message.user,
-      message.text,
-      message.ts,
-      botUserId,
-    );
+  // DM以外では自発応答しない（チャンネル/グループでの反応は app_mention 経由のみ）
+  if (!("channel_type" in message) || message.channel_type !== "im") return;
+  if (!("channel" in message)) return;
+
+  if (message.user !== SLACK_USER_ID) {
+    await say(NOT_ACCEPTING);
     return;
   }
 
-  // DM以外では自発応答しない（チャンネル/グループでの反応は app_mention 経由のみ）
-  if (!("channel_type" in message) || message.channel_type !== "im") return;
-
-  // 日報修正モード中なら、メッセージを修正指示として扱う
+  // 日報修正モード中なら、メッセージを修正指示として扱う（日報の定時実行は停止中）
   const pendingState = getPendingDraft(message.user);
-  if (pendingState?.editing && "channel" in message) {
+  if (pendingState?.editing) {
     try {
       await handleEditFeedback(
         app.client,
@@ -102,40 +121,20 @@ app.message(async ({ message, say }) => {
     return;
   }
 
-  // DMメッセージ → Intent Routerで応答
   try {
-    const result = await routeIntent(message.text);
-
-    if (result.specialAction === "briefing") {
-      await say(toSlackMrkdwn(result.text));
-      await sendBriefing(app.client, SLACK_USER_ID);
+    if (SCAN_COMMAND.test(message.text)) {
+      await enqueueJob(app.client, "work_scan", { manual: true });
+      await say(`高橋さん宛ての依頼を拾うよう、PCの Claude Code に頼みました。数分でカードが届きます。${pcNote()}`);
       return;
     }
-    if (result.specialAction === "test_briefing") {
-      await say(toSlackMrkdwn(result.text));
-      await sendTestBriefing(app.client, SLACK_USER_ID);
-      return;
-    }
-    if (result.specialAction === "daily_report") {
-      await say(toSlackMrkdwn(result.text));
-      await sendDailyReportDraft(app.client, SLACK_USER_ID);
-      return;
-    }
-    if (result.specialAction === "work_scan") {
-      await say(toSlackMrkdwn(result.text));
-      await say(await runManualWorkScan());
-      return;
-    }
-
-    await say(toSlackMrkdwn(result.text));
+    await requestChat(message.channel, message.text, message.ts);
   } catch (e) {
-    console.error("[Intent Router] Error:", e);
-    await say("すみません、エラーが発生しました。もう一度お試しください。");
+    console.error("[Chat] request error:", e);
+    await say("すみません、PCへの依頼でエラーが発生しました。もう一度お試しください。");
   }
 });
 
-// App mention handler — チャンネルでもClaude tool useで応答
-// 全応答はスレッド内に集約する（チャンネル本体への直接投稿を避ける）
+// App mention handler — 全応答はスレッド内に集約する（チャンネル本体への直接投稿を避ける）
 app.event("app_mention", async ({ event, say }) => {
   const text = (event.text || "").replace(/<@[^>]+>/g, "").trim();
   // スレッド内 → そのスレッドへ。スレッド外 → 親メッセージのtsに新スレッド。
@@ -149,49 +148,35 @@ app.event("app_mention", async ({ event, say }) => {
     return;
   }
 
-  // CGSチャンネル内 → Orbit改修依頼か分類
+  // CGSチャンネル内 → Orbit改修依頼の分類（Claude を使うため PC の worker で実行）
   if (event.user && event.channel === CGS_CHANNEL_ID) {
     try {
-      const handled = await handleOrbitFixIntake(app.client, {
+      await enqueueJob(app.client, "orbit_intake", {
         channelId: event.channel,
         userId: event.user,
         text,
         ts: event.ts,
-        threadTs: event.thread_ts,
+        threadTs: event.thread_ts || null,
         source: "mention",
       });
-      if (handled) return;
     } catch (e) {
-      console.error("[OrbitFix] mention intake error:", e);
+      console.error("[OrbitFix] mention intake enqueue error:", e);
     }
     // CGSチャンネルでOrbit以外の話題には反応しない（無駄な発信防止）
     return;
   }
 
+  if (event.user !== SLACK_USER_ID) {
+    await say({ text: NOT_ACCEPTING, thread_ts: replyThreadTs });
+    return;
+  }
+
   try {
-    const result = await routeIntent(text);
-
-    if (result.specialAction === "briefing") {
-      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
-      await sendBriefing(app.client, SLACK_USER_ID);
-      return;
-    }
-    if (result.specialAction === "test_briefing") {
-      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
-      await sendTestBriefing(app.client, SLACK_USER_ID);
-      return;
-    }
-    if (result.specialAction === "daily_report") {
-      await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
-      await sendDailyReportDraft(app.client, event.user || SLACK_USER_ID);
-      return;
-    }
-
-    await say({ text: toSlackMrkdwn(result.text), thread_ts: replyThreadTs });
+    await requestChat(event.channel, text, event.ts, replyThreadTs);
   } catch (e) {
-    console.error("[Intent Router] Error:", e);
+    console.error("[Chat] mention request error:", e);
     await say({
-      text: "すみません、エラーが発生しました。もう一度お試しください。",
+      text: "すみません、PCへの依頼でエラーが発生しました。もう一度お試しください。",
       thread_ts: replyThreadTs,
     });
   }
@@ -408,6 +393,7 @@ app.action("work_analyze", async ({ ack, body, action }) => {
   const card = cardOf(body);
   try {
     await queueAnalysis(valueOf(action));
+    await signalWorker(app.client);
     await settleCard(
       app.client,
       card.channel,
@@ -425,6 +411,7 @@ app.action("work_retry", async ({ ack, body, action }) => {
   const card = cardOf(body);
   try {
     await queueAnalysis(valueOf(action));
+    await signalWorker(app.client);
     await settleCard(app.client, card.channel, card.ts, card.blocks, "⏳ もう一度、作業待ちに入れました。");
   } catch (e) {
     await notifyWorkError(card.channel, e);
@@ -470,16 +457,15 @@ app.action("work_draft", async ({ ack, body, action }) => {
   try {
     const item = await getItem(valueOf(action));
     if (!item) throw new Error("依頼が見つかりませんでした");
+    // 下書きは Claude を使うため PC の worker で作る（できたらこの表示を下書きカードに書き換える）
     const placeholder = await app.client.chat.postMessage({
       channel: card.channel,
-      text: "📝 返信の下書きを作っています…",
+      text: `📝 返信の下書きを作っています…（PCの Claude Code で作成・1〜2分）${pcNote()}`,
     });
-    const draft = await createDraft(item);
-    await app.client.chat.update({
+    await enqueueJob(app.client, "draft", {
+      item_id: item.id,
       channel: card.channel,
-      ts: placeholder.ts || "",
-      text: "📝 返信の下書き",
-      blocks: draftCardBlocks(item, draft),
+      placeholder_ts: placeholder.ts || null,
     });
   } catch (e) {
     await notifyWorkError(card.channel, e);
@@ -618,6 +604,7 @@ app.view("work_reinstruct_submit", async ({ ack, view }) => {
   if (!meta.id || !meta.channel || !instruction) return;
   try {
     await queueAnalysis(meta.id, instruction);
+    await signalWorker(app.client);
     await app.client.chat.postMessage({
       channel: meta.channel,
       ...(meta.ts ? { thread_ts: meta.ts } : {}),
@@ -640,6 +627,7 @@ app.view("work_reinstruct_submit", async ({ ack, view }) => {
   if (env.DATABASE_URL) {
     try {
       await initDatabase();
+      await ensureBoard(app.client); // PCの worker との連絡用スレッド
     } catch (e) {
       console.error("[Startup] Database init failed:", e);
     }
@@ -659,8 +647,8 @@ app.view("work_reinstruct_submit", async ({ ack, view }) => {
 
   await app.start();
   console.log("⚡ SAFELY Bot is running!");
-  console.log("🧠 Claude tool use: enabled");
-  console.log("👀 Proactive observer: watching channels");
+  console.log("🧠 Claude: PC worker only (no API key usage on Railway)");
+  console.log("💤 Proactive observer: stopped (2026-10-01)");
   // console.log("📰 Intelligence briefing: weekdays 9:00 JST"); // 一時停止
   //   console.log("📬 Gmail check: weekdays 8:30 JST"); // 一時停止
   //   console.log("💬 Pending threads check: weekdays 9:30 JST"); // 一時停止
