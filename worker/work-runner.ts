@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { WebClient } from "@slack/web-api";
-import { setCliChildEnv, runClaudeCli } from "../src/utils/claude-client.js";
+import { setCliChildEnv, runClaudeCli, updateClaudeCli } from "../src/utils/claude-client.js";
 
 const ORIGINAL_ENV = { ...process.env };
 setCliChildEnv(ORIGINAL_ENV);
@@ -282,6 +282,11 @@ async function main(): Promise<void> {
 
   const vars = await loadSecretsWithRetry();
   Object.assign(process.env, vars, { MAMO_LLM: "cli" });
+
+  // 既定のモデルが新しくなると古い CLI では動かなくなる（2026-10-02 に実際に止まった）ため、起動時に更新を確認する
+  const jstDay = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+  let lastUpdateDay = jstDay();
+  if (await updateClaudeCli()) log("Claude Code の更新を確認しました");
 
   const wi = await import("../src/data-sources/work-inbox.js");
   const jobs = await import("../src/data-sources/llm-jobs.js");
@@ -718,6 +723,11 @@ ${prev}${instruction}
   for (;;) {
     try {
       const quiet = isQuietHours();
+      // 毎朝6時（作業を始める前）に Claude Code の更新を確認する
+      if (jstHour() === 6 && lastUpdateDay !== jstDay()) {
+        lastUpdateDay = jstDay();
+        if (await updateClaudeCli()) log("Claude Code の更新を確認しました（毎朝6時）");
+      }
       if (wasQuiet && !quiet) wakeAll(); // 朝7時に、夜のあいだ溜まった作業を始める
       wasQuiet = quiet;
 

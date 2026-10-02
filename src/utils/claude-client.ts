@@ -71,12 +71,39 @@ interface CliResult {
   total_cost_usd?: number;
 }
 
+/** 「この版の Claude Code ではモデルを使えない」＝ CLI の更新が必要なエラーか */
+function isOutdatedCliError(text: string): boolean {
+  return /does not support this model|or newer is required|run 'claude update'/i.test(text);
+}
+
+let lastUpdateAt = 0;
+
 /**
- * claude -p を1回実行して JSON の結果を返す。
- * mode="light": ツールなし・MCPなし・空ディレクトリ（仕分けや下書きなどの短い作業）
- * mode="workspace": ワークスペースで通常の Claude Code として動く（DMでの会話・分析）
+ * claude update を実行する（既定モデルが新しくなると古い CLI では動かなくなるため）。
+ * 連続で走らないよう10分に1回まで。更新できたら true。
  */
-export function runClaudeCli(opts: {
+export function updateClaudeCli(): Promise<boolean> {
+  if (Date.now() - lastUpdateAt < 10 * 60_000) return Promise.resolve(false);
+  lastUpdateAt = Date.now();
+  return new Promise((resolve) => {
+    const child = spawn(CLAUDE_BIN, ["update"], { env: cliChildEnv(), windowsHide: true });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const timer = setTimeout(() => child.kill(), 5 * 60_000);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      console.log(`[claude update] code=${code} ${out.replace(/\s+/g, " ").slice(0, 200)}`);
+      resolve(code === 0);
+    });
+  });
+}
+
+type RunOpts = {
   prompt: string;
   systemPrompt?: string;
   jsonSchema?: object;
@@ -84,7 +111,25 @@ export function runClaudeCli(opts: {
   cwd?: string;
   extraArgs?: string[];
   timeoutMs?: number;
-}): Promise<CliResult> {
+};
+
+/**
+ * claude -p を実行して JSON の結果を返す。CLI が古いと言われたら、自動で更新して1回だけやり直す。
+ * mode="light": ツールなし・MCPなし・空ディレクトリ（仕分けや下書きなどの短い作業）
+ * mode="workspace": ワークスペースで通常の Claude Code として動く（DMでの会話・分析）
+ */
+export async function runClaudeCli(opts: RunOpts): Promise<CliResult> {
+  try {
+    return await runClaudeCliOnce(opts);
+  } catch (e) {
+    if (!(e instanceof FriendlyClaudeError && e.kind === "outdated")) throw e;
+    console.log("[claude] CLI が古いため更新してやり直します");
+    if (!(await updateClaudeCli())) throw e;
+    return await runClaudeCliOnce(opts);
+  }
+}
+
+function runClaudeCliOnce(opts: RunOpts): Promise<CliResult> {
   const mode = opts.mode || "light";
   const args = ["-p", "--output-format", "json", "--no-session-persistence"];
   if (mode === "light") {
@@ -131,6 +176,14 @@ export function runClaudeCli(opts: {
         return reject(new Error(`Claude Code の出力を読めません: ${stdout.slice(0, 300)}`));
       }
       const text = String(parsed.result || "");
+      if (parsed.is_error && isOutdatedCliError(text)) {
+        return reject(
+          new FriendlyClaudeError(
+            "このPCの Claude Code が古く、いまのモデルを使えません。ターミナルで `claude update` を実行してください（自動更新に失敗しました）。",
+            "outdated",
+          ),
+        );
+      }
       if (/session limit|weekly limit|usage limit/i.test(text) && parsed.is_error) {
         return reject(
           new FriendlyClaudeError(
@@ -139,8 +192,11 @@ export function runClaudeCli(opts: {
           ),
         );
       }
-      if (parsed.is_error || parsed.subtype !== "success") {
-        return reject(new Error(`Claude Code がエラーで終了しました（${parsed.subtype || "unknown"}）: ${text.slice(0, 300)}`));
+      if (parsed.is_error) {
+        return reject(new Error(`Claude Code がエラーを返しました: ${text.slice(0, 300)}`));
+      }
+      if (parsed.subtype !== "success") {
+        return reject(new Error(`Claude Code が途中で終了しました（${parsed.subtype || "unknown"}）: ${text.slice(0, 300)}`));
       }
       resolve(parsed);
     });
